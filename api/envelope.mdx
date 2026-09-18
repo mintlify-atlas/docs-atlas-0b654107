@@ -1,0 +1,379 @@
+---
+title: "Envelope — Parsing and Reading the Response Object"
+sidebarTitle: "Envelope"
+description: "The Envelope wraps every field the endpoint returns: the echo, warnings, pagination counts, facets, rate-limit header, and the result rows."
+---
+
+Every call to `GET https://meawfy.com/internal/api/results.json` returns a single JSON object. The `Envelope` class wraps that object and gives you typed access to each part of it — counts, facets, rate-limit metadata, and the rows themselves. Because the endpoint answers `200` to everything, including malformed requests, the envelope's echo is the primary debugging surface: it tells you what the endpoint actually understood, not what you sent.
+
+## Constructor
+
+```python
+Envelope(payload, headers, url)
+```
+
+You will almost never construct an `Envelope` yourself — `MeawfyClient.search()` returns one. The constructor takes the raw decoded JSON dict as `payload`, an optional headers mapping (used to read `X-RateLimit-Remaining`), and the request URL.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+envelope = client.search("periodic table", providers=["mega", "dropbox"], per_page=50)
+```
+
+## Reading Order
+
+The handbook's prescribed reading order is **query → warnings → results**. The echo reveals what the endpoint understood; warnings flag conditions like an empty drive or a rewritten parameter; only then should you process the rows.
+
+```python
+# 1. Check the echo
+report = envelope.echo_report(query)
+if not report.ok:
+    print(report.summary())
+
+# 2. Check warnings
+for warning in envelope.warnings:
+    print(f"warning: {warning}")
+
+# 3. Process results
+for row in envelope:
+    print(row.name, row.human_size)
+```
+
+## Wire Shape
+
+The raw JSON body returned by the endpoint has this structure:
+
+```json
+{
+  "query": {
+    "search_query": "periodic table",
+    "providers": ["mega", "dropbox"],
+    "sort": "size",
+    "order": "desc"
+  },
+  "facets": {
+    "providers": { "mega": 812, "dropbox": 471 },
+    "ext": { "pdf": 640, "zip": 233 }
+  },
+  "warnings": [],
+  "total": 1283,
+  "page": 1,
+  "per_page": 50,
+  "pages": 26,
+  "took_ms": 42,
+  "results": [
+    {
+      "id": "mega:4f2a1b",
+      "name": "Periodic Table of Elements.pdf",
+      "provider": "mega",
+      "kind": "file",
+      "ext": "pdf",
+      "size_bytes": 4718592,
+      "size": "4.5 MB",
+      "files": null,
+      "path": "/Chemistry/Reference",
+      "url": "https://mega.nz/file/...",
+      "hash": "sha1:a3b4c5d6...",
+      "mirrors": 3,
+      "score": 0.97,
+      "indexed_at": "2024-03-15",
+      "checked_at": "2024-11-01",
+      "alive": true,
+      "preview": null
+    }
+  ]
+}
+```
+
+## Properties
+
+<AccordionGroup>
+  <Accordion title="Echo and warnings">
+
+### `query` / `echo`
+
+```python
+envelope.query  # dict[str, Any]
+envelope.echo   # same object — an alias
+```
+
+The `query` object echoes what the endpoint *understood*, never what you sent. A parameter missing from this dict did nothing. On an endpoint that answers `200` to everything, this is the whole debugging story.
+
+```python
+# Check which parameters the endpoint honoured
+report = envelope.echo_report(query)
+print(report.summary())
+# echo confirms 5/6 · absent from echo: min_mirrors
+```
+
+### `warnings`
+
+```python
+envelope.warnings  # tuple[str, ...]
+```
+
+A tuple of plain-text strings. Warnings are informational — the endpoint still returns rows — but they signal conditions worth checking: an indexed drive with zero results, a parameter that was rewritten, or a query that matched nothing on one provider.
+
+### `error`
+
+```python
+envelope.error  # dict[str, Any] | None
+```
+
+Present when the body contains an `error` object. The endpoint returns this under HTTP `200`, so the status code alone is not a reliable success signal. The `MeawfyClient` raises `ResponseError` when it sees this field; callers that use a raw transport can branch on `envelope.ok` instead.
+
+### `ok`
+
+```python
+envelope.ok  # bool
+```
+
+`False` when the body carried an `error` object. Check this before accessing `results` when you are not using `MeawfyClient.search()`.
+
+### `explain`
+
+```python
+envelope.explain  # dict[str, Any] | None
+```
+
+Present only when `explain=1` was sent. Contains the endpoint's parse: terms, filters honoured, filters dropped, and weights applied. `None` when `explain` was not sent or when the endpoint did not return it.
+
+  </Accordion>
+
+  <Accordion title="Pagination counts">
+
+### `total`
+
+```python
+envelope.total  # int
+```
+
+The total number of rows matching the query across all requested providers, computed before the page window. A value of `0` can mean either no matching rows or a drive that was never indexed — `provider_counts()` tells the two apart.
+
+### `page`
+
+```python
+envelope.page  # int
+```
+
+The current page number, one-based.
+
+### `per_page`
+
+```python
+envelope.per_page  # int
+```
+
+The number of rows per page. Defaults to `24`; capped at `100`.
+
+### `pages`
+
+```python
+envelope.pages  # int
+```
+
+The total number of pages. Computed by the endpoint from `total` and `per_page`. Navigation past `page × per_page > 10,000` is not reachable — the client raises `DeepPagingError` before the request is sent.
+
+### `took_ms`
+
+```python
+envelope.took_ms  # int
+```
+
+How long the endpoint spent on this request, in milliseconds. Observed range is roughly 20–80 ms. Useful for benchmarking projections: a narrow `fields=` list saves both bandwidth and server time.
+
+  </Accordion>
+
+  <Accordion title="Rate limit and rows">
+
+### `rate_limit_remaining`
+
+```python
+envelope.rate_limit_remaining  # int | None
+```
+
+Read from the `X-RateLimit-Remaining` response header. `None` before the first call, or when the transport did not forward headers. The budget is 120 requests per minute; the sliding-window `RateLimiter` inside `MeawfyClient` paces locally so the wall is rarely reached.
+
+### `has_rows`
+
+```python
+envelope.has_rows  # bool
+```
+
+`True` when `results` is non-empty. Shorthand for `bool(envelope.results)`.
+
+### `results`
+
+```python
+envelope.results  # tuple[Result, ...]
+```
+
+An immutable tuple of `Result` objects. Empty on an error response or a query that matched nothing. Iterate directly with `for row in envelope` or count with `len(envelope)`.
+
+  </Accordion>
+
+  <Accordion title="Raw payload and facets">
+
+### `payload` / `raw`
+
+```python
+envelope.payload  # dict[str, Any]
+envelope.raw      # same object — an alias
+```
+
+The raw decoded JSON dict, exactly as returned by the transport. Useful for serialising back to JSON, diffing against a fixture, or accessing any field the typed properties do not cover.
+
+### `facets`
+
+```python
+envelope.facets  # dict[str, Any]
+```
+
+The raw facets dict from the response. Facets are computed *after* the filters and *before* the page window, so they describe the whole restricted set — not just the current page. A `facets=providers` request with `per_page=1` still gives you provider counts for all matching rows.
+
+  </Accordion>
+</AccordionGroup>
+
+## Methods
+
+### `facet(name) → dict[str, int]`
+
+Returns one facet group as a `{value: count}` dict. Values not present in the response are simply absent from the dict.
+
+```python
+# Request facets=providers,ext in your query first
+envelope.facet("ext")
+# {'pdf': 640, 'zip': 233, 'epub': 44}
+
+envelope.facet("providers")
+# {'mega': 812, 'dropbox': 471}
+```
+
+### `provider_counts() → dict[str, int]`
+
+Returns the drive split with all three documented providers always present, filling in `0` for any drive not mentioned in the facets response.
+
+```python
+counts = envelope.provider_counts()
+# {'mega': 812, 'dropbox': 471, 'gdrive': 0}
+```
+
+<Warning>
+`total: 0` is ambiguous: it reads the same whether a drive returned no results or was never indexed. `provider_counts()` resolves the ambiguity — a missing drive contributes `0` to the dict, the same as a drive that returned nothing. If you sent `providers=dropbox` and `provider_counts()["dropbox"]` is `0`, Dropbox has no matching rows. If you did not send `facets=providers`, the counts will all be `0`.
+</Warning>
+
+### `echo_report(sent) → EchoReport`
+
+Compares the envelope's echo against a `Query` object or a plain dict of parameter names to sent values. Returns an `EchoReport` describing which parameters were honoured, which were rewritten, and which are absent from the echo entirely.
+
+```python
+from meawfy import Query
+
+query = Query("worksheet", min_mirrors=2, sort="indexed")
+envelope = client.search(query)
+report = envelope.echo_report(query)
+# EchoReport(
+#   honoured={'search_query': 'worksheet', 'sort': 'indexed'},
+#   changed={},
+#   absent=('min_mirrors',)
+# )
+print(report.summary())
+# echo confirms 2/3 · absent from echo: min_mirrors
+```
+
+## Iteration and Length
+
+`Envelope` supports direct iteration over its results and `len()`:
+
+```python
+# Iterate rows directly
+for row in envelope:
+    print(row.name)
+
+# Count rows on the current page
+print(len(envelope))   # same as len(envelope.results)
+
+# Both are equivalent to
+for row in envelope.results:
+    print(row.name)
+```
+
+## Empty Drive vs. Empty Query
+
+The most common source of confusion is `total: 0`. Two very different situations produce it:
+
+<Tabs>
+  <Tab title="Empty query">
+    The search matched nothing. `provider_counts()` returns non-zero counts for at least one provider (because the endpoint acknowledged the provider), but the query term found no rows.
+
+    ```python
+    envelope = client.search(
+        "zzznomatch",
+        providers=["dropbox"],
+        facets="providers"
+    )
+    print(envelope.total)              # 0
+    print(envelope.provider_counts())  # {'mega': 0, 'dropbox': 0, 'gdrive': 0}
+    # dropbox is 0 because no rows matched, not because it wasn't indexed
+    ```
+  </Tab>
+  <Tab title="Unindexed drive">
+    The drive exists in the endpoint's vocabulary but has no rows for this query — or was never indexed for it. Without facets, the two cases are indistinguishable from `total` alone.
+
+    ```python
+    envelope = client.search(
+        "periodic table",
+        providers=["gdrive"],
+        facets="providers"
+    )
+    counts = envelope.provider_counts()
+    print(counts)  # {'mega': 0, 'dropbox': 0, 'gdrive': 0}
+    # gdrive returned 0 — either no match or never indexed for this term
+    ```
+
+    Always request `facets=providers` and check `provider_counts()` when the per-drive split matters.
+  </Tab>
+</Tabs>
+
+<Note>
+Experimental providers (`rapidshare`, `pixeldrain`, `filebin`, `gofile`, `catbox`, `1fichier`, `uploadhaven`, `krakenfiles`) appear in `provider_counts()` only when the response mentions them — they are not pre-filled with zeros the way the three documented drives are.
+</Note>
+
+## Complete Example
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+query = Query(
+    "climate report",
+    providers=["mega", "dropbox", "gdrive"],
+    sort="size",
+    per_page=50,
+    facets="providers,ext",
+    fields="id,name,provider,size,url",
+)
+envelope = client.search(query)
+
+# 1. Echo first
+report = envelope.echo_report(query)
+if not report.ok:
+    print(report.summary())
+
+# 2. Warnings
+for w in envelope.warnings:
+    print(f"warning: {w}")
+
+# 3. Counts
+print(f"total={envelope.total} pages={envelope.pages} took={envelope.took_ms}ms")
+print(f"rate limit remaining: {envelope.rate_limit_remaining}")
+
+# 4. Per-drive split
+for provider, count in envelope.provider_counts().items():
+    print(f"  {provider}: {count}")
+
+# 5. Rows
+for row in envelope:
+    print(row.name, row.human_size, row.url)
+```

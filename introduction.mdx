@@ -1,0 +1,114 @@
+---
+title: "Meawfy Client: stdlib-Only Python SDK for File Search"
+sidebarTitle: "Introduction"
+description: "A zero-dependency Python SDK wrapping the Meawfy results endpoint — one URL, 50 parameters, three cloud drives, and eight documented failure modes."
+---
+
+Meawfy Client is a stdlib-only Python library for `GET https://meawfy.com/internal/api/results.json`, the file-search endpoint that indexes MEGA, Dropbox, and Google Drive. No API key, no OAuth, no third-party packages — `urllib` handles transport, `argparse` drives the CLI, and the whole package runs in place from a single directory. The library transcribes every parameter name, default, cap, and caveat from *The Query Handbook*, Part VI, and turns the endpoint's documented failure modes — eight of them — from silent gotchas into catchable Python exceptions or inspectable return values.
+
+## The endpoint
+
+The endpoint is a single URL with no versioning in the path and no authentication required.
+
+| Property | Detail |
+|---|---|
+| **URL** | `GET https://meawfy.com/internal/api/results.json` |
+| **Auth** | None — no API key, no OAuth |
+| **Index** | `mega`, `dropbox`, `gdrive` (documented) plus eight undocumented experimental hosts |
+| **Latency** | 20–80 ms observed; the envelope reports the actual time in `took_ms` |
+| **Rate limit** | 120 requests per minute; `X-RateLimit-Remaining` on every response; `429` with `Retry-After` in seconds at zero |
+| **Returns** | Metadata and the public share URL — file bodies and link unlocks are a separate credited step on the site |
+| **Status** | Internal and unversioned; parameter renames are not announced |
+
+The endpoint answers `200` to malformed requests, ignores an unknown parameter without any warning, and falls through to the default when an enum value is wrongly capitalised. It also stops paging at 10,000 rows without saying so. Each of those behaviours is a trap. The client turns every trap into something a program can branch on.
+
+## The three documented providers
+
+The `providers` parameter accepts a comma-separated list or a repeated key. Only three values are documented as part of the contract:
+
+```python
+from meawfy import PROVIDERS
+
+print(PROVIDERS)  # ('mega', 'dropbox', 'gdrive')
+```
+
+The endpoint also answers for eight experimental hosts (`rapidshare`, `pixeldrain`, `filebin`, `gofile`, `catbox`, `1fichier`, `uploadhaven`, `krakenfiles`) that are never documented. Their rows are thinner than a MEGA row, their URLs are already unlocked, and whether they will answer next month is unknown. The client tracks them under `EXPERIMENTAL_PROVIDERS` and annotates any query that uses them with a note in `Query.advice`.
+
+## The eight traps
+
+Every one of these trap scenarios returns HTTP `200`. Without a dedicated client, the only way to discover that your filter did nothing is to compare the echoed `query` object with what you sent — and even then you need to know what to look for.
+
+| Trap | The endpoint's behaviour | The client's response |
+|---|---|---|
+| **Unknown parameter ignored** | `200`, no warning, no effect — the filter is simply absent | `UnknownParameter` raised before the request is built; closest known name included in the error message |
+| **200 is not success** | A malformed request returns `200` with an `error` object and no `results` | `ResponseError` on any body-level `error`; `Envelope.ok` for callers that prefer to branch |
+| **Empty drive looks like a working filter** | `total: 0` is indistinguishable from a drive that was never indexed | `facets=providers` and `envelope.provider_counts()` expose the per-drive count, not just the total |
+| **Case and encoding issues** | `sort=Size` falls through to relevance; `+` in a query string decodes to a space | Enum values are lowercased and validated before the request is sent; `quote_plus` encodes spaces as `+` and literal `+` as `%2B` |
+| **`sort=size` on folders** | Folders with an unknown total sort last in both directions, regardless of sort direction | A note in `Query.advice` pointing at `kind=file` as the safer alternative |
+| **Rate limit wall** | `X-RateLimit-Remaining` counts down; `429` at zero; `Retry-After` in seconds | Sliding-window local pacing; `Retry-After` honoured; retries bounded by `max_retries`; `client.remaining` exposed |
+| **Dead rows vanish after 72 hours** | Purged, not archived — no parameter can reach them after the grace period | `dead_rows()` builds the detection window; `DeepPagingError` is not applicable here, but the 72-hour limit is a first-class cap |
+| **Paging stops at 10,000 rows** | Keeps answering with the cap applied, so a deeper page is misleading rather than empty | `DeepPagingError` raised before the request; `collect()` stops at the window and sets `Collection.truncated` |
+
+<Note>
+Two of the eight traps — the unknown parameter name and the capitalised enum — are closed *before* a request is sent, because the client owns the parameter vocabulary. The other six are shaped into return values rather than surprises, so the caller can branch on them.
+</Note>
+
+## Project structure
+
+The package is a single directory with no external dependencies. Every module has one job.
+
+```text
+meawfy-client/
+├── meawfy/
+│   ├── __init__.py       public surface
+│   ├── __main__.py       python -m meawfy
+│   ├── cli.py            the command line
+│   ├── client.py         transport, retries, rate limiting, paging, verify, diff
+│   ├── errors.py         one class per documented failure mode
+│   ├── models.py         Result, Preview, Envelope, EchoReport
+│   ├── params.py         the 50 parameters, their statuses, caps and validators
+│   ├── query.py          Query: a validated parameter set that renders as a URL
+│   ├── recipes.py        R7 to R14, from sheet 18
+│   ├── render.py         plain-text tables, shared by the CLI and the examples
+│   └── reports.py        Collection, VerificationReport, DiffReport
+├── examples/
+│   ├── quickstart.py     one query, the echo, the rows
+│   ├── course_packs.py   R7 / R13: folder collections, per drive
+│   ├── duplicate_audit.py content hash, hash= lookup, id= lookup
+│   ├── fresh_drops.py    after / created_after, weights=fresh, explain=1
+│   ├── preview_grid.py   R14: previews, resolution, preview_size
+│   ├── param_health.py   verify() over the parameters that may have moved
+│   └── dead_link_sweep.py R11: record dead rows inside the 72-hour window
+└── README.md
+```
+
+The key objects and where they live:
+
+| Object | Module | Purpose |
+|---|---|---|
+| `MeawfyClient` | `client.py` | Transport, pacing, paging, verification helpers |
+| `Query` | `query.py` | Validated parameter set that renders as a URL |
+| `Envelope` | `models.py` | The full response: echo, warnings, facets, rows |
+| `Result` | `models.py` | One row — 17 fields by attribute or by key |
+| `EchoReport` | `models.py` | Sent vs. echoed — the debugging story |
+| `Collection` | `reports.py` | A completed paged walk, with `truncated` flag |
+| `RetryPolicy` | `client.py` | Backoff strategy and deadline |
+| Error classes | `errors.py` | One class per documented failure mode |
+
+## What the client will not do
+
+Some limitations are inherent to the endpoint and cannot be worked around:
+
+- **Link unlocking** — the `url` field contains the public share URL; unlocking is a separate credited step on the site.
+- **Purged rows** — after 72 hours, a dead row is gone. Not marked, not archived. No parameter can reach it.
+- **Paging past 10,000** — `page × per_page` is capped. Narrow the filters; there is no way to walk a deeper result set.
+- **Parameter guarantees** — seven names are load-bearing; everything marked `planned` or `reserved` may move without notice.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the package, run your first search, and read the echo report in under five minutes.
+  </Card>
+  <Card title="Installation" icon="wrench" href="/installation">
+    Run in-place with PYTHONPATH, verify the environment, and set the four environment variables.
+  </Card>
+</CardGroup>

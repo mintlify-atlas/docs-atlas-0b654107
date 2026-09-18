@@ -1,0 +1,485 @@
+---
+title: "CLI Command Reference — All Meawfy Commands"
+sidebarTitle: "Commands"
+description: "Complete flag reference for every meawfy CLI command: search, url, params, recipes, recipe, verify, diff, dead, and record — with examples for each."
+---
+
+Every Meawfy CLI command is documented below with its synopsis, all flags and their defaults, and a concrete example. All commands accept the global options described in the [CLI Overview](./overview). Commands that build a query — `search`, `url`, `record`, and `recipe` — accept every documented endpoint parameter as a flag.
+
+---
+
+<Accordion title="search QUERY — run a search and print results">
+
+Run one request against the endpoint and print the matching rows as a plain-text table. Pass `--limit N` to walk multiple pages automatically until `N` rows are collected. Pass `--url-only` to print the request URL without making a network call.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy search QUERY [query flags] [output flags] [global options]
+```
+
+**Query flags** — every documented parameter has a flag. The most common ones:
+
+| Flag | Wire name | Default | Notes |
+|---|---|---|---|
+| `-p NAME` / `--provider NAME` | `providers` | all three | Repeatable: `-p mega -p dropbox` |
+| `-e LIST` / `--ext LIST` | `ext` | all | Comma list, no dot: `pdf,epub` |
+| `--exclude-ext LIST` | `exclude_ext` | — | Planned |
+| `--license LIST` | `license` | — | e.g. `mit,cc-by` |
+| `--kind VALUE` | `kind` | any | `file`, `folder`, or `any` (planned) |
+| `--min-size SIZE` | `min_size` | 0 | Bytes or suffix: `10mb`, `1.5gb` |
+| `--max-size SIZE` | `max_size` | ∞ | The most effective filter on the endpoint |
+| `--size-bucket VALUE` | `size_bucket` | — | `small`/`medium`/`large`/`huge` (planned) |
+| `--min-files N` | `min_files` | 0 | Folder rows with at least N files |
+| `--max-files N` | `max_files` | ∞ | Planned; `1` finds mis-filed single files |
+| `--after DATE` | `after` | — | Indexed-date window start, `YYYY-MM-DD` |
+| `--before DATE` | `before` | — | Indexed-date window end, `YYYY-MM-DD` |
+| `--checked-after DATE` | `checked_after` | — | Planned: liveness checked after this date |
+| `--alive` / `--dead` | `alive` | true | `--dead` returns rows in the 72-h grace window |
+| `--dedupe` / `--no-dedupe` | `dedupe` | true | `--no-dedupe` keeps all hash duplicates |
+| `--min-mirrors N` | `min_mirrors` | 0 | Planned: at least N copies |
+| `--source-domain HOST` | `source_domain` | — | Planned: provenance domain |
+| `--preview` | `preview` | 0 | Planned: include preview object per row |
+| `--has-preview BOOL` | `has_preview` | — | Planned: `true` or `false` |
+| `--preview-size VALUE` | `preview_size` | medium | `tiny`/`small`/`medium`/`large` (planned) |
+| `--resolution VALUE` | `resolution` | — | `480p`/`720p`/`1080p`/`4k` (planned) |
+| `--duration RANGE` | `duration` | — | Planned: `30-120`, `60-`, or `-300` |
+| `--page-count RANGE` | `page_count` | — | Planned: document page range |
+| `--language LIST` | `language` | — | Planned: ISO 639-1 codes |
+| `--author TEXT` | `author` | — | Planned: substring match |
+| `--tags LIST` | `tags` | — | Planned: AND across tags |
+| `--format LIST` | `format` | — | Planned: `mp4`, `epub3`, `pdfa` |
+| `--id ROW` | `id` | — | Planned: direct row lookup, e.g. `mega:4f2a1b` |
+| `--hash HASH` | `hash` | — | Planned: content hash lookup |
+| `--created-after DATE` | `created_after` | — | Planned: file creation date from |
+| `--created-before DATE` | `created_before` | — | Planned: file creation date to |
+| `--folder-path PATH` | `folder_path` | — | Planned: exact or wildcard `*/courses/python` |
+| `--depth N` | `depth` | — | Planned: folder depth; range `2-4` |
+| `--parent FOLDER` | `parent` | — | Reserved |
+| `-s VALUE` / `--sort VALUE` | `sort` | relevance | `relevance`/`size`/`files`/`name`/`indexed`/`checked`/`mirrors`/`has_preview` |
+| `-o VALUE` / `--order VALUE` | `order` | per key | `asc` or `desc`; ignored when `sort=relevance` |
+| `--weights SPEC` | `weights` | broad | Preset (`exact`/`broad`/`folder`/`fresh`) or `name:3,files:2` (planned) |
+| `--min-score F` | `min_score` | 0 | Planned: cut tail below this score |
+| `--boost SPEC` | `boost` | — | Reserved: `provider:mega=1.5` |
+| `--page N` | `page` | 1 | One-based; `page × per_page` capped at 10,000 |
+| `--per-page N` | `per_page` | 24 | Capped at 100 |
+| `--fields LIST` | `fields` | all 17 | Projection: `id,name,provider,size,url` |
+| `--facets LIST` | `facets` | none | `providers`/`ext`/`size`/`kind`/`all` (planned) |
+| `--explain` | `explain` | 0 | Planned: add parse to envelope |
+| `--pretty` | `pretty` | 0 | Planned: indented JSON |
+| `--callback NAME` | `callback` | — | Reserved: JSONP wrapper |
+| `--cursor TOKEN` | `cursor` | — | Planned: opaque token past the paging cap |
+| `--set KEY=VALUE` | — | — | Override any wire-name parameter; `KEY=` removes it |
+
+**Output flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--limit N` | — | Walk pages until N rows are collected; prints a summary line with pages fetched and total |
+| `--columns LIST` | `name,size,provider,url` | Comma list of table columns |
+| `--url-only` | false | Print the URL and advice, no network call |
+| `--fail-on-empty` | false | Exit with code 4 when the result set is empty |
+
+**Examples**
+
+```bash
+# Basic search on MEGA and Dropbox, filter by size, sort largest first
+python3 -m meawfy search "periodic table" -p mega -p dropbox --min-size 1mb --sort size -o desc
+
+# Collect up to 250 rows across pages, output as JSON for jq
+python3 -m meawfy search "worksheet" --limit 250 --json | jq '.results[].url'
+
+# Folders only, at least 50 files, sorted by collection size
+python3 -m meawfy search "course pack" -p dropbox --kind folder --min-files 50 --sort files -o desc
+
+# Preview-bearing HD videos, sorted largest first
+python3 -m meawfy search "documentary" -e mp4,mkv --preview --resolution 720p --sort size -o desc
+
+# Narrow projection to the five fields a real client renders
+python3 -m meawfy search "atlas" --fields id,name,provider,size,url --per-page 100
+
+# Inspect facets to see the provider split without reading every row
+python3 -m meawfy search "climate report" --sort size --per-page 1 --facets providers,ext
+
+# Exit with code 4 if no rows — useful in CI scripts
+python3 -m meawfy search "rare title" -p mega --fail-on-empty || echo "Nothing on MEGA"
+
+# Check what URL would be built without making a request
+python3 -m meawfy search "atlas" -p gdrive --sort indexed --url-only
+```
+
+</Accordion>
+
+---
+
+<Accordion title="url QUERY — print the request URL without a network call">
+
+Build the query URL from the provided flags and print it to stdout. No request is sent. Advice notes (if any) are written to stderr. Useful for inspecting what the client would send before committing to a live call, or for constructing URLs to paste into other tools.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy url QUERY [query flags] [global options]
+```
+
+This command accepts all the same query flags as `search` (see the table above). It does not accept `--limit`, `--columns`, `--url-only`, or `--fail-on-empty`, because none of those make sense without a response.
+
+**Examples**
+
+```bash
+# Preview the URL for a multi-provider, sorted search
+python3 -m meawfy url "periodic table" -p mega -p dropbox --min-size 1mb --sort size -o desc
+
+# Inspect the wire form of a complex filter set
+python3 -m meawfy url "node course" -p mega --kind folder --min-files 10 --sort files -o desc
+
+# Copy the URL to the clipboard (macOS)
+python3 -m meawfy url "atlas" -p gdrive --fields id,name,url | pbcopy
+
+# Use --set to reach a planned parameter by its wire name
+python3 -m meawfy url "worksheet" --set min_mirrors=2 --set checked_after=2026-09-01
+```
+
+<Note>
+The `url` command uses the same validation as `search`. An invalid parameter value (e.g. `--sort Size`) raises a `MeawfyError` and exits with code 2, even though no request would be made.
+</Note>
+
+</Accordion>
+
+---
+
+<Accordion title="params — browse the parameter registry">
+
+Print the full registry of all 50 documented parameters. Each entry shows the group, name, default value, status (`contract`, `planned`, or `reserved`), and a one-line description. Use `--load-bearing` to print only the seven names the front end depends on, or `--status` to filter by status.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy params [--group GROUP] [--status STATUS] [--load-bearing] [--full] [global options]
+```
+
+**Flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--group GROUP` | — | Show only parameters in one group: `question`, `drive`, `material`, `health`, `media`, `metadata`, `identity`, `folder`, `order`, or `shape` |
+| `--status STATUS` | — | Show only `contract`, `planned`, or `reserved` parameters |
+| `--load-bearing` | false | Show only the seven names the front end reads on every page load |
+| `--full` | false | Print full descriptions without truncating at 78 characters |
+
+The footer of the output always shows the caps: `per_page ≤ 100`, `page × per_page ≤ 10,000`, `search_query ≤ 200 characters`, weight fields ≤ 4, extensions ≤ 20, 120 requests/minute, 72-hour dead-row grace period.
+
+**Examples**
+
+```bash
+# Print the entire registry
+python3 -m meawfy params
+
+# Only the seven load-bearing contract parameters
+python3 -m meawfy params --load-bearing
+
+# All contract-status parameters
+python3 -m meawfy params --status contract
+
+# Only the ordering and paging parameters
+python3 -m meawfy params --group order
+python3 -m meawfy params --group shape
+
+# Full descriptions without truncation
+python3 -m meawfy params --status planned --full
+
+# Export the registry as JSON
+python3 -m meawfy params --json > registry.json
+```
+
+</Accordion>
+
+---
+
+<Accordion title="recipes — list R7–R14 with goals">
+
+Print the eight recipes from sheet 18 of *The Query Handbook*: their code, goal title, and a short note explaining what each one does. No network call is made. Run `recipe CODE` to execute one.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy recipes [global options]
+```
+
+This command has no flags of its own beyond the global options.
+
+**Recipes listed**
+
+| Code | Goal |
+|---|---|
+| R7 | One drive, and only folders that are already collections |
+| R8 | One title across three drives, in a single call |
+| R9 | Small, recent, alive, and confirmed by a second copy |
+| R10 | A finite, ordered answer for somebody else's page |
+| R11 | Maintenance: recently dead rows, before they vanish |
+| R12 | Two drives, one phrase, and a diff you can trust |
+| R13 | A Node.js course, sorted by collection size |
+| R14 | Videos with previews, HD and above, sorted by size |
+
+**Examples**
+
+```bash
+# Print all recipes in a table
+python3 -m meawfy recipes
+
+# Export as JSON to inspect the full parameter sets
+python3 -m meawfy recipes --json
+```
+
+</Accordion>
+
+---
+
+<Accordion title="recipe CODE — run one recipe">
+
+Execute one of the eight handbook recipes. Placeholder dates (`{today-3d}`, `{today-8d}`, `{today-17d}`) are resolved relative to today so recipes keep returning rows. Use `--set KEY=VALUE` to override any parameter, and `--set KEY=` (empty value) to remove one and restore the literal printed request.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy recipe CODE [--set KEY=VALUE ...] [--limit N] [--columns LIST] [global options]
+```
+
+**Flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `CODE` | required | Recipe code: `R7`, `R8`, `R9`, `R10`, `R11`, `R12`, `R13`, or `R14` |
+| `--set KEY=VALUE` | — | Repeatable: override any wire-name parameter. `KEY=` removes a parameter |
+| `--limit N` | — | Walk pages until N rows are collected |
+| `--columns LIST` | default columns | Table columns for the output |
+
+**Examples**
+
+```bash
+# Run R7 with its default parameters (Dropbox folders, 50+ files)
+python3 -m meawfy recipe R7
+
+# Run R7 but require at least 20 files instead of 50
+python3 -m meawfy recipe R7 --set min_files=20
+
+# Run R9 with the exact dates from Edition 1 (remove the placeholder)
+python3 -m meawfy recipe R9 --set after=2026-09-10 --set checked_after=2026-09-01
+
+# Run R11 (dead rows) and export as JSON
+python3 -m meawfy recipe R11 --json
+
+# Run R14 (preview videos) and collect 100 rows
+python3 -m meawfy recipe R14 --limit 100
+
+# Run R10 (paginated, with explain) and inspect the parse
+python3 -m meawfy recipe R10
+
+# Run R13 for a different course term
+python3 -m meawfy recipe R13 --set search_query="python course"
+```
+
+<Note>
+`recipe` spends real requests against your 120-per-minute budget. `R12` is two-call by design (`diff` is its CLI equivalent); the others each spend one request per page fetched.
+</Note>
+
+</Accordion>
+
+---
+
+<Accordion title="verify NAME VALUE QUERY — did the index honour this parameter?">
+
+Send the same query twice — once with the named parameter set to `VALUE`, and once without it — then compare the echo objects returned by the endpoint. If the `query` echo changed between the two calls, the parameter was honoured. If the echo and the result counts are identical, the parameter had no effect and the command exits with code 5.
+
+This command uses two requests. Use it to confirm that a `planned` parameter is actually being read by the current deployment, or to reproduce the "silent ignore" trap described in the handbook.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy verify NAME VALUE [--set KEY=VALUE ...] [global options]
+```
+
+**Arguments and flags**
+
+| Argument / Flag | Required | Effect |
+|---|---|---|
+| `NAME` | yes | The wire name of the parameter to test, e.g. `min_files` |
+| `VALUE` | yes | The value to send in the first call |
+| `--set KEY=VALUE` | — | Repeatable: extra parameters added to both calls |
+
+**Exit codes**
+
+- `0` — the parameter was honoured (the echo changed or the result total changed)
+- `2` — a `MeawfyError` was raised
+- `5` — the parameter was **not** honoured
+
+**Examples**
+
+```bash
+# Was min_mirrors honoured for "worksheet"?
+python3 -m meawfy verify min_mirrors 2 --set search_query=worksheet
+
+# Test min_files for a known folder-heavy query
+python3 -m meawfy verify min_files 20 --set search_query="course pack" --set providers=dropbox
+
+# Replay a saved fixture to check the echo
+python3 -m meawfy verify min_size 1000000 --set search_query=atlas --fixture fixtures/atlas.json
+
+# Script-friendly: branch on exit code 5
+python3 -m meawfy verify checked_after 2026-09-01 --set search_query=worksheet
+if [ $? -eq 5 ]; then
+  echo "checked_after is not honoured — treat liveness data as untested."
+fi
+
+# Export the verification report as JSON
+python3 -m meawfy verify min_files 50 --set search_query="node course" --json
+```
+
+<Warning>
+`verify` always makes two live requests. If you are near the 120-requests-per-minute rate limit, use `--fixture` to replay a saved response or `--rate-limit` to lower the local ceiling before running a batch of verifications.
+</Warning>
+
+</Accordion>
+
+---
+
+<Accordion title="diff QUERY — compare two drives on a content key">
+
+Query the same phrase against two drives in two separate calls, then diff the result sets on a content key — by default `hash`. The output shows rows shared by both drives, rows present only on the left, rows present only on the right, and rows with the same name but a different hash (the "same name, different content" case).
+
+This is the CLI equivalent of recipe R12 and calls `MeawfyClient.diff()` internally.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy diff QUERY [--left PROVIDER] [--right PROVIDER] [--key FIELD] [--max-size SIZE] [global options]
+```
+
+**Flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `QUERY` | required | The phrase to search for on both drives |
+| `--left PROVIDER` | `mega` | The left drive (`mega`, `dropbox`, or `gdrive`) |
+| `--right PROVIDER` | `gdrive` | The right drive |
+| `--key FIELD` | `hash` | The field to diff on; `hash` is reliable, `name` is not |
+| `--max-size SIZE` | — | A size ceiling applied to both calls |
+
+**Examples**
+
+```bash
+# Default: MEGA vs Google Drive, diffed on hash
+python3 -m meawfy diff "trading post"
+
+# Compare MEGA and Dropbox
+python3 -m meawfy diff "trading post" --left mega --right dropbox
+
+# Diff on name to find duplicate titles across drives
+python3 -m meawfy diff "climate report" --left mega --right gdrive --key name
+
+# Narrow both calls with a size cap
+python3 -m meawfy diff "atlas" --left dropbox --right gdrive --max-size 500mb
+
+# Export the diff report as JSON
+python3 -m meawfy diff "periodic table" --left mega --right dropbox --json
+```
+
+<Note>
+`diff` always makes two requests (one per drive). Diff on `hash`, not on `name` — the same title can appear on different drives with completely different content, and the handbook's own recipe R12 makes this distinction explicit.
+</Note>
+
+</Accordion>
+
+---
+
+<Accordion title="dead — fetch rows detected dead before the purge (R11)">
+
+Query for rows where `alive=false` and `checked_after` is set to `--within-hours` ago. Dead rows are only available during the 72-hour grace window after the liveness check that failed. After that they are purged from the index entirely — not marked, not archived, not reachable by any parameter.
+
+This command implements recipe R11 directly.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy dead [--within-hours N] [--columns LIST] [global options]
+```
+
+**Flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--within-hours N` | `72` | Length of the window in hours. A value above 72 returns no extra rows and prints an advice note |
+| `--columns LIST` | default columns | Table columns for the output |
+
+**Exit codes**
+
+- `0` — the command completed (even if the result set is empty)
+- `4` — no dead rows were found in the window
+
+**Examples**
+
+```bash
+# Dead rows from the last 72 hours (the full grace window)
+python3 -m meawfy dead
+
+# Narrow to the last 24 hours
+python3 -m meawfy dead --within-hours 24
+
+# Export as JSON for further processing
+python3 -m meawfy dead --json > dead-rows.json
+
+# Show provider and URL columns only
+python3 -m meawfy dead --columns provider,url,checked_at
+
+# Combine with --quiet to suppress the advice note when within-hours=72
+python3 -m meawfy dead --quiet
+```
+
+<Warning>
+A value of `--within-hours` greater than 72 is accepted but produces no extra rows. The purge has no workaround: once a row passes the 72-hour window it is gone from the index permanently. The advice line on stderr is printed to remind you of this.
+</Warning>
+
+</Accordion>
+
+---
+
+<Accordion title="record FILE QUERY — save an envelope for fixture replay">
+
+Run a query and write the full response body to `FILE` as JSON. The saved file can be replayed later with `--fixture FILE` on any command, which lets you test against a pinned response without hitting the live endpoint. This is the handbook's recommended defence against an unversioned endpoint: record the response on the day you tested it, then compare a fresh recording after any suspected change.
+
+**Synopsis**
+
+```bash
+python3 -m meawfy record FILE QUERY [query flags] [global options]
+```
+
+This command accepts the same query flags as `search`. The `--per-page` flag controls how many rows are written per page.
+
+**Examples**
+
+```bash
+# Record a response with 50 rows per page
+python3 -m meawfy record fixtures/periodic-table.json "periodic table" --per-page 50
+
+# Replay the saved response as if it were a live call
+python3 -m meawfy search "periodic table" --fixture fixtures/periodic-table.json
+
+# Record with a narrow projection to keep the file small
+python3 -m meawfy record fixtures/atlas.json "atlas" --fields id,name,provider,url --per-page 100
+
+# Use the fixture in a verify call
+python3 -m meawfy verify min_files 20 --set search_query="course pack" --fixture fixtures/course-pack.json
+
+# Record dead rows at the time of the last sweep
+python3 -m meawfy record fixtures/dead-2026-09-10.json "" --dead --per-page 100
+```
+
+<Note>
+A replayed envelope echoes the recorded `query` object unchanged, so `echo_report` will report every parameter as honoured regardless of what you send during replay. The fixture is frozen — it is a regression baseline, not a live check.
+</Note>
+
+<Tip>
+Name fixtures with a date suffix (`periodic-table-2026-09-10.json`) so it is clear when each was recorded. Keep them in version control alongside your scripts. The next time you run a fresh `record` against the live endpoint, diff the two files to spot any parameter renames or schema changes.
+</Tip>
+
+</Accordion>

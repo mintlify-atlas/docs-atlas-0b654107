@@ -1,0 +1,750 @@
+---
+title: "MeawfyClient — Python Client for results.json"
+sidebarTitle: "MeawfyClient"
+description: "Complete reference for MeawfyClient: constructor, every method, properties, stats dict, and working code examples for search, paging, and verification."
+---
+
+`MeawfyClient` is the main entry point for the Meawfy results endpoint. It handles request construction, parameter validation, rate-limit pacing, automatic retries, response parsing, and the multi-call helpers (`iterate`, `collect`, `verify`, `diff`) that the endpoint's traps make necessary to get right. Every method raises before sending if a parameter name is unknown, and raises after receiving if the response body carries an `error` object — the latter happening under an HTTP `200`.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+env = client.search("periodic table", providers=["mega", "dropbox"], min_files=20)
+print(env.total, len(env.results))
+# 1283 24
+```
+
+---
+
+## Constructor
+
+```python
+MeawfyClient(
+    base_url=None,
+    *,
+    timeout=None,
+    max_retries=3,
+    requests_per_minute=None,
+    user_agent=None,
+    headers=None,
+    transport=None,
+    sleep=None,
+    retry=None,
+    deadline=None,
+)
+```
+
+All arguments are optional. A `MeawfyClient()` with no arguments is production-ready: it points at the live endpoint, paces to 120 requests per minute, retries transient errors three times with exponential backoff, and reads `MEAWFY_TIMEOUT` and `MEAWFY_RATE_LIMIT` from the environment.
+
+<ParamField path="base_url" type="str | None" default="None">
+  The endpoint to call. Accepts the full URL (`https://meawfy.com/internal/api/results.json`), a hostname (`meawfy.com`), or `None`. When `None`, the constructor reads `MEAWFY_BASE_URL` from the environment, falling back to the production endpoint. Hostnames have `https://` and `/internal/api/results.json` appended automatically by `resolve_base_url`.
+</ParamField>
+
+<ParamField path="timeout" type="float | None" default="None">
+  Per-request socket timeout in seconds. When `None`, the constructor reads `MEAWFY_TIMEOUT` from the environment, defaulting to `15.0`. This is the timeout for a single network attempt; the `RetryPolicy.deadline` (via `deadline=`) bounds the total time across all attempts.
+</ParamField>
+
+<ParamField path="max_retries" type="int" default="3">
+  Number of retries after the first attempt, so `max_retries=3` means at most 4 total attempts. Builds a `RetryPolicy(max_attempts=max_retries + 1)` internally. Cannot be combined with `retry=`; raises `InvalidParameter` if both are supplied with non-default values.
+</ParamField>
+
+<ParamField path="requests_per_minute" type="int | None" default="None">
+  Local rate-limit ceiling for the sliding-window throttle. When `None`, reads `MEAWFY_RATE_LIMIT` from the environment, defaulting to `120` (the documented endpoint limit). Setting a lower value creates a safety margin; setting a higher value only matters if the endpoint's own limit is raised.
+</ParamField>
+
+<ParamField path="user_agent" type="str | None" default="None">
+  Overrides the `User-Agent` header. The default is `meawfy-client/1.0 (stdlib urllib; Query Handbook, Part VI)`. Useful when a server-side log needs to identify the caller.
+</ParamField>
+
+<ParamField path="headers" type="Mapping[str, str] | None" default="None">
+  Additional headers merged into every request. The `Accept: application/json` and `User-Agent` headers are always present; values in `headers` are appended after them, so they can override `User-Agent` but not `Accept`.
+</ParamField>
+
+<ParamField path="transport" type="Transport | None" default="None">
+  A callable `(url: str) -> TransportResponse` that replaces the default `urllib_transport`. Pass this to inject a test double, a mock, or a `replay_transport`. When `None` and `MEAWFY_FIXTURE` is set in the environment, a `replay_transport` pointing at that file is used automatically. See [Transport](/api/transport) for the full interface.
+</ParamField>
+
+<ParamField path="sleep" type="Callable[[float], None] | None" default="None">
+  Replaces `time.sleep` throughout the client (retries and rate-limit waits). Useful in tests to make time pass instantly. The same callable is forwarded to the `RateLimiter`.
+</ParamField>
+
+<ParamField path="retry" type="RetryPolicy | None" default="None">
+  A fully configured `RetryPolicy` that replaces the policy built from `max_retries` and `deadline`. When supplied, `max_retries` must be at its default (`3`) and `deadline` must be `None`; otherwise the constructor raises `InvalidParameter`. See [RetryPolicy](/api/retry-policy).
+</ParamField>
+
+<ParamField path="deadline" type="float | None" default="None">
+  Wall-clock seconds that bound the whole logical call, waits included. Forwarded into the `RetryPolicy` constructor. Cannot be combined with `retry=`.
+</ParamField>
+
+---
+
+## Properties
+
+### `remaining`
+
+```python
+@property
+def remaining(self) -> int | None:
+```
+
+The last `X-RateLimit-Remaining` value seen on any response, or `None` before the first successful request. The endpoint counts down on every response; this is the same number `stats["last_remaining"]` holds.
+
+### `stats`
+
+```python
+@property  # not decorated, but a plain dict attribute
+stats: dict[str, Any]
+```
+
+A running tally updated after every attempt. All keys are present from construction:
+
+<ResponseField name="requests" type="int">
+  Successful HTTP responses received (status 200 bodies without an `error` object). Incremented once per completed request, not per attempt.
+</ResponseField>
+
+<ResponseField name="attempts" type="int">
+  Total network attempts, including those that were retried. `attempts - requests` is the number of failed attempts.
+</ResponseField>
+
+<ResponseField name="retries" type="int">
+  Attempts that triggered a wait and were retried. Equals `attempts - requests` when no request was abandoned.
+</ResponseField>
+
+<ResponseField name="waited_ms" type="int">
+  Cumulative milliseconds spent in retry backoff waits. Does not include rate-limit pacing time (that is hidden inside `RateLimiter.acquire()`).
+</ResponseField>
+
+<ResponseField name="rows" type="int">
+  Total `Result` objects collected across all successful responses. Updated by every method that calls `_request`.
+</ResponseField>
+
+<ResponseField name="last_remaining" type="int | None">
+  The `X-RateLimit-Remaining` from the most recent successful response.
+</ResponseField>
+
+<ResponseField name="last_took_ms" type="int | None">
+  The `took_ms` field from the most recent successful response body — the server-side processing time.
+</ResponseField>
+
+<ResponseField name="last_url" type="str | None">
+  The fully constructed URL of the most recent request, including query string.
+</ResponseField>
+
+```python
+client = MeawfyClient()
+client.search("worksheet", per_page=50)
+print(client.stats)
+# {
+#   "requests": 1, "attempts": 1, "retries": 0,
+#   "waited_ms": 0, "rows": 50,
+#   "last_remaining": 118, "last_took_ms": 34,
+#   "last_url": "https://meawfy.com/internal/api/results.json?search_query=worksheet&per_page=50"
+# }
+```
+
+---
+
+## Methods
+
+### `search`
+
+```python
+def search(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    **params: Any,
+) -> Envelope:
+```
+
+Sends one request and returns the parsed `Envelope`. This is the core method that all other methods ultimately call.
+
+The `query` argument accepts a pre-built `Query` object, a plain `dict`, a bare search string, or `None` when all parameters are passed as keyword arguments. Keyword arguments are forwarded to `Query.coerce`, which validates them and raises before any network call if a name is unknown.
+
+The endpoint answers `200` to almost everything; `search` unwraps the body and raises `ResponseError` when it finds an `error` object inside, so callers never have to check `envelope.ok` manually.
+
+<ParamField path="query" type="Query | Mapping | str | None">
+  The search expression. A bare string becomes `search_query`. A `Query` object cannot be combined with additional keyword arguments — the constructor raises `InvalidParameter` in that case.
+</ParamField>
+
+<ParamField path="**params" type="Any">
+  Any of the 50 documented wire-name parameters, e.g. `providers`, `sort`, `per_page`, `fields`. Unknown names raise `UnknownParameter` before the request is sent.
+</ParamField>
+
+**Returns** `Envelope` — the full parsed response.
+
+**Raises**
+- `UnknownParameter` — a keyword argument name is not one of the 50 documented names.
+- `InvalidParameter` — a value fails validation (e.g. `sort="Size"`, `per_page=200`).
+- `DeepPagingError` — `page × per_page > 10,000`.
+- `ResponseError` — the body contained an `error` object under HTTP 200.
+- `RateLimited` — retries were exhausted while the endpoint was returning 429.
+- `TransportError` — a network error that was not retried or exhausted retries.
+
+```python
+client = MeawfyClient()
+
+# String query with keyword params
+env = client.search("node course", providers="mega", kind="folder", min_files=10)
+
+# Pre-built Query object
+from meawfy import Query
+q = Query("worksheet", max_size="400mb", sort="indexed", order="desc")
+env = client.search(q)
+
+# Dict of parameters
+env = client.search({"search_query": "atlas", "sort": "size", "per_page": 50})
+
+# No search term — browses the whole index (query.advice will warn you)
+env = client.search(alive=False, sort="checked", order="asc", per_page=100)
+```
+
+---
+
+### `search_raw`
+
+```python
+def search_raw(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    **params: Any,
+) -> dict[str, Any]:
+```
+
+Identical to `search` but returns the raw JSON dict (`envelope.payload`) rather than an `Envelope` object. Use this when piping the response into another tool or serialising to disk without the model layer.
+
+**Returns** `dict[str, Any]` — the unparsed response body.
+
+**Raises** same as `search`.
+
+```python
+import json
+
+raw = client.search_raw("climate report", sort="size", per_page=1)
+print(json.dumps(raw, indent=2))
+```
+
+---
+
+### `url_for`
+
+```python
+def url_for(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    **params: Any,
+) -> str:
+```
+
+Constructs and returns the URL that `search` would call — no network request, no side effects, no stats update. Useful for logging, debugging, or generating links to display.
+
+**Returns** `str` — the full URL with encoded query string.
+
+**Raises** `UnknownParameter`, `InvalidParameter`, `DeepPagingError` if the parameters are invalid.
+
+```python
+url = client.url_for("periodic table", providers=["mega", "dropbox"], sort="size")
+print(url)
+# https://meawfy.com/internal/api/results.json?search_query=periodic+table&providers=mega%2Cdropbox&sort=size
+```
+
+---
+
+### `iterate`
+
+```python
+def iterate(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    *,
+    per_page: int = 100,
+    start_page: int = 1,
+    max_rows: int | None = None,
+    **params: Any,
+) -> Iterator[Result]:
+```
+
+Walks pages and yields individual `Result` objects, stopping automatically at the 10,000-row reachable window (`page × per_page ≤ 10,000`). Iteration also stops when the endpoint returns an empty page or when `max_rows` is reached.
+
+`iterate` is the correct tool for any loop that processes results one row at a time, for export or streaming work, or when the total row count is unknown. It does not accumulate rows in memory — each page is yielded and discarded.
+
+<ParamField path="per_page" type="int" default="100">
+  Rows per page. Capped at the endpoint maximum of `100`. Larger values reduce request count; smaller values are useful when `max_rows` is also set.
+</ParamField>
+
+<ParamField path="start_page" type="int" default="1">
+  The first page to request. Combined with `per_page`, the window check `page × per_page ≤ 10,000` still applies.
+</ParamField>
+
+<ParamField path="max_rows" type="int | None" default="None">
+  Stop after yielding this many rows. `None` means iterate until the results are exhausted or the window is reached.
+</ParamField>
+
+**Returns** `Iterator[Result]`
+
+**Raises** same transport and response errors as `search`, raised on the first failing page request.
+
+```python
+import csv
+
+client = MeawfyClient()
+with open("results.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["id", "name", "provider", "size"])
+    for row in client.iterate("worksheet", max_size="400mb", fields="id,name,provider,size"):
+        writer.writerow([row.get("id"), row.get("name"), row.get("provider"), row.get("size")])
+```
+
+---
+
+### `collect`
+
+```python
+def collect(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    *,
+    per_page: int = 100,
+    max_rows: int | None = None,
+    start_page: int = 1,
+    **params: Any,
+) -> Collection:
+```
+
+Walks all reachable pages and returns a `Collection` that bundles the rows with metadata about the walk: how many pages were fetched, the total reported by the endpoint, whether the 10,000-row window was hit, and any advice about narrowing the query.
+
+Use `collect` when you need the full set in memory, a summary of the walk, or the `truncated` flag to detect when the result exceeds the window. For streaming large sets, prefer `iterate`.
+
+**Returns** `Collection` with fields:
+
+<ResponseField name="rows" type="tuple[Result, ...]">
+  All collected rows, up to `max_rows` if set.
+</ResponseField>
+
+<ResponseField name="pages_fetched" type="int">
+  Number of HTTP requests made during this walk.
+</ResponseField>
+
+<ResponseField name="total" type="int">
+  The `total` count from the first envelope — the endpoint's estimate for the whole unrestricted set.
+</ResponseField>
+
+<ResponseField name="truncated" type="bool">
+  `True` when the result set exceeded the 10,000-row window. When `True`, the `advice` tuple contains a message recommending a narrower query rather than deeper paging.
+</ResponseField>
+
+<ResponseField name="took_ms" type="int">
+  Cumulative server-side processing time across all pages.
+</ResponseField>
+
+<ResponseField name="advice" type="tuple[str, ...]">
+  Guidance generated by the client when `truncated` is `True`.
+</ResponseField>
+
+```python
+col = client.collect("climate report", providers="mega", sort="size", order="desc")
+print(f"fetched {len(col.rows)} of {col.total} rows in {col.pages_fetched} page(s)")
+if col.truncated:
+    print("warning: result exceeds 10,000-row window; narrow the query")
+    for note in col.advice:
+        print(f" · {note}")
+
+for row in col:
+    print(row.name, row.size)
+```
+
+---
+
+### `verify`
+
+```python
+def verify(
+    self,
+    name: str,
+    value: Any,
+    query: Query | Mapping[str, Any] | str | None = None,
+    **params: Any,
+) -> VerificationReport:
+```
+
+Tests whether the endpoint actually honours a parameter by sending the request twice — once with the parameter and once without — then comparing the echo objects. A filter missing from the echo did nothing, regardless of what the status line or the row count suggests. This is the only test that reliably catches a renamed or silently dropped parameter.
+
+Costs two requests against the 120/minute budget. The `name` argument must be one of the 50 documented parameter names; otherwise `UnknownParameter` is raised before any request is sent.
+
+<ParamField path="name" type="str">
+  The parameter wire name to test (e.g. `"min_mirrors"`, `"language"`, `"depth"`).
+</ParamField>
+
+<ParamField path="value" type="Any">
+  The value to send. Validated by the same normaliser used in `Query`, so `InvalidParameter` is raised before sending if the value is out of vocabulary.
+</ParamField>
+
+<ParamField path="query" type="Query | Mapping | str | None">
+  The base query that both calls share. Both requests use the same search term and other parameters.
+</ParamField>
+
+**Returns** `VerificationReport`:
+
+<ResponseField name="name" type="str">The parameter name that was tested.</ResponseField>
+<ResponseField name="sent" type="str">The normalised wire value that was sent.</ResponseField>
+<ResponseField name="echoed" type="Any">What the endpoint echoed back for this parameter, or `None` if absent.</ResponseField>
+<ResponseField name="verdict" type="str">`"honoured"` — echo matches sent value. `"rewritten"` — echo has a different value. `"ignored"` — absent from the echo entirely.</ResponseField>
+<ResponseField name="total_without" type="int">Row count from the baseline request (without the parameter).</ResponseField>
+<ResponseField name="total_with" type="int">Row count from the candidate request (with the parameter).</ResponseField>
+<ResponseField name="warnings" type="tuple[str, ...]">Warnings from the candidate response body.</ResponseField>
+<ResponseField name="remaining" type="int | None">Rate-limit remaining after the second call.</ResponseField>
+
+```python
+report = client.verify("min_mirrors", 2, "worksheet")
+print(report.verdict)           # "honoured" | "rewritten" | "ignored"
+print(report.explain())
+# min_mirrors=2: honoured, the echo reports '2'; total 1283 -> 847
+```
+
+<Note>
+A verdict of `"ignored"` does not always mean the parameter is broken. A value equal to the documented default is legitimately omitted from the echo; any other `"ignored"` verdict means the name has moved or the parameter is not yet active.
+</Note>
+
+---
+
+### `diff`
+
+```python
+def diff(
+    self,
+    query: Query | Mapping[str, Any] | str | None = None,
+    *,
+    left: str = "mega",
+    right: str = "gdrive",
+    key: str = "hash",
+    fields: str | None = None,
+    **params: Any,
+) -> DiffReport:
+```
+
+Compares two providers for the same search phrase on a content key (Recipe R12). Sends one request per provider and reports which content keys are shared, which appear only on one side, and which names appear on both sides with different keys — the drive that has the content versus the drive that has a copy of its title.
+
+Costs two requests. The `key` argument must be one of the 17 row fields (`hash`, `id`, `name`, etc.); `InvalidParameter` is raised otherwise. The `providers` and `provider` parameters are stripped from `**params` automatically; use `left` and `right` instead.
+
+<ParamField path="left" type="str" default='"mega"'>
+  The first provider to compare. Must be a value from `KNOWN_PROVIDERS`.
+</ParamField>
+
+<ParamField path="right" type="str" default='"gdrive"'>
+  The second provider to compare.
+</ParamField>
+
+<ParamField path="key" type="str" default='"hash"'>
+  The row field to compare on. `"hash"` compares content identity; `"id"` compares index identity. Must be one of the 17 row fields.
+</ParamField>
+
+<ParamField path="fields" type="str | None" default="None">
+  Field projection. Defaults to `id,name,{key},mirrors,size,provider`. If `key` is not already in the projection, it is prepended automatically.
+</ParamField>
+
+**Returns** `DiffReport`:
+
+<ResponseField name="left" type="str">Left provider name.</ResponseField>
+<ResponseField name="right" type="str">Right provider name.</ResponseField>
+<ResponseField name="key" type="str">The field the comparison was made on.</ResponseField>
+<ResponseField name="left_total" type="int">Total rows reported by the endpoint for the left provider.</ResponseField>
+<ResponseField name="right_total" type="int">Total rows reported by the endpoint for the right provider.</ResponseField>
+<ResponseField name="shared_keys" type="tuple[str, ...]">Key values present on both sides.</ResponseField>
+<ResponseField name="left_only_keys" type="tuple[str, ...]">Key values present only on the left.</ResponseField>
+<ResponseField name="right_only_keys" type="tuple[str, ...]">Key values present only on the right.</ResponseField>
+<ResponseField name="same_name_different_key" type="tuple[str, ...]">Names that appear on both sides but with different key values — files that share a title but not their content.</ResponseField>
+<ResponseField name="partial" type="bool">`True` when either side has more rows than `per_page`; only the first page was compared.</ResponseField>
+
+```python
+report = client.diff("trading post", left="mega", right="gdrive")
+print(report.explain())
+# mega vs gdrive on hash: 12 shared, 5 only in mega, 3 only in gdrive
+# 2 name(s) appear on both sides with a different hash: …
+
+if report.partial:
+    print(f"note: only first page compared; mega={report.left_total}, gdrive={report.right_total}")
+```
+
+<Warning>
+When `partial` is `True`, the comparison only covers the first page of results from each provider. To compare the full set, narrow the query rather than increasing `per_page`: `page × per_page ≤ 10,000` is the hard ceiling, and a narrowed phrase is always more reliable.
+</Warning>
+
+---
+
+### `dead_rows`
+
+```python
+def dead_rows(
+    self,
+    *,
+    within_hours: int = 72,
+    **params: Any,
+) -> Envelope:
+```
+
+Recipe R11: returns rows detected dead within the purge window, sorted oldest-checked first. Sets `alive=False`, `checked_after` to `within_hours` ago, `sort=checked`, `order=asc`, and `per_page=100`. Any of these defaults can be overridden via `**params`.
+
+Dead rows are purged from the index 72 hours after detection — not marked, not archived, not recoverable through any parameter. Passing a `within_hours` value larger than `72` is not an error, but returns nothing that the purge has already removed.
+
+<ParamField path="within_hours" type="int" default="72">
+  How far back to look, in hours. The effective ceiling is 72 — the endpoint's purge window.
+</ParamField>
+
+**Returns** `Envelope` with rows sorted oldest-checked first.
+
+```python
+env = client.dead_rows()
+print(f"{env.total} dead rows detected in the last 72 hours")
+for row in env.results:
+    print(row.cell("provider"), row.cell("checked_at"), row.get("url"))
+
+# Or save them to a file before they are purged:
+env = client.dead_rows(within_hours=24, fields="id,provider,url,checked_at")
+```
+
+---
+
+### `run_recipe`
+
+```python
+def run_recipe(self, code: str, **overrides: Any) -> Envelope:
+```
+
+Runs one of the eight handbook recipes (R7–R14) with placeholders resolved to today's dates and any parameter overrides applied. An override set to `None` removes that parameter from the recipe's defaults, returning the literal request from the printed sheet.
+
+<ParamField path="code" type="str">
+  Recipe code, e.g. `"R7"`, `"R11"`, `"R14"`. Case-insensitive. Raises `UnknownParameter` for an unrecognised code.
+</ParamField>
+
+<ParamField path="**overrides" type="Any">
+  Parameter overrides. Set a parameter to `None` to remove it from the recipe defaults.
+</ParamField>
+
+**Returns** `Envelope`.
+
+```python
+# R7: Dropbox folders with at least 50 files, sorted by file count
+env = client.run_recipe("R7")
+
+# R7 with a different term and lower file threshold
+env = client.run_recipe("R7", search_query="tutorial series", min_files=20)
+
+# R11 with the date frozen to the printed sheet value
+env = client.run_recipe("R11", checked_after=None)
+
+# R14: HD videos with previews
+env = client.run_recipe("R14", search_query="lecture", resolution="1080p")
+```
+
+---
+
+### `save_envelope`
+
+```python
+def save_envelope(
+    self,
+    path: str | Path,
+    query: Query | Mapping[str, Any] | str | None = None,
+    **params: Any,
+) -> Envelope:
+```
+
+Runs one request and writes its JSON body to `path`. Parent directories are created automatically. The written file is what `replay_transport` and the `MEAWFY_FIXTURE` environment variable serve back, and what a regression test should compare against. This is the handbook's recommended way to pin the date you last verified the endpoint.
+
+<ParamField path="path" type="str | Path">
+  Destination file path. Written as UTF-8 JSON with two-space indentation.
+</ParamField>
+
+**Returns** `Envelope` — the same object that would be returned by `search`.
+
+```python
+# Record a real response for later replay
+env = client.save_envelope(
+    "fixtures/periodic-table.json",
+    "periodic table",
+    providers=["mega", "dropbox"],
+    per_page=50,
+)
+print(f"saved {len(env.results)} rows to fixtures/periodic-table.json")
+
+# Later: replay without a network call
+from meawfy import replay_transport
+client_offline = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
+env2 = client_offline.search("periodic table")
+```
+
+---
+
+### `recipe` (static)
+
+```python
+@staticmethod
+def recipe(code: str) -> Recipe:
+```
+
+Returns the `Recipe` dataclass for one handbook recipe by code. Does not make a network call. Use this to inspect a recipe's parameters before running it.
+
+**Returns** `Recipe` with fields `code`, `title`, `params` (raw, placeholders not resolved), and `note`.
+
+**Raises** `UnknownParameter` for an unrecognised code.
+
+```python
+r = MeawfyClient.recipe("R9")
+print(r.title)   # "Small, recent, alive, and confirmed by a second copy"
+print(r.note)
+print(r.params)  # {'search_query': 'worksheet', 'max_size': '400mb', ...}
+```
+
+---
+
+### `recipe_params` (static)
+
+```python
+@staticmethod
+def recipe_params(code: str, **overrides: Any) -> dict[str, Any]:
+```
+
+Returns the recipe's parameter dict with date placeholders resolved to real dates and overrides applied. This is what `run_recipe` passes to `search` internally, and it is useful when you want the parameters without immediately running them.
+
+**Returns** `dict[str, Any]` — ready to pass to `search(**params)`.
+
+```python
+params = MeawfyClient.recipe_params("R9", search_query="syllabus")
+# {'search_query': 'syllabus', 'max_size': '400mb',
+#  'after': '2026-09-02', 'checked_after': '2026-08-24', ...}
+
+# Use the params dict directly:
+env = client.search(**params)
+```
+
+---
+
+## Custom transport injection
+
+The `transport=` constructor argument replaces the entire HTTP layer with any callable matching `(url: str) -> TransportResponse`. This is the intended mechanism for testing, for offline development, and for wrapping a third-party HTTP library.
+
+```python
+from meawfy import MeawfyClient, replay_transport
+
+# Offline: replay a saved response for every request
+client = MeawfyClient(transport=replay_transport("fixtures/worksheet.json"))
+env = client.search("worksheet")  # no network call made
+
+# Testing: inject a mock transport
+from meawfy import TransportResponse
+
+def mock_transport(url: str) -> TransportResponse:
+    return TransportResponse(
+        status=200,
+        payload={
+            "results": [{"id": "mega:abc123", "name": "test.pdf", "provider": "mega"}],
+            "total": 1,
+            "page": 1,
+            "per_page": 24,
+            "pages": 1,
+            "took_ms": 5,
+            "query": {"search_query": "test"},
+        },
+        headers={"x-ratelimit-remaining": "119"},
+    )
+
+client = MeawfyClient(transport=mock_transport)
+env = client.search("test")
+assert env.total == 1
+```
+
+<Tip>
+Set `MEAWFY_FIXTURE=/path/to/response.json` in the environment to make any `MeawfyClient()` constructed without an explicit `transport=` serve the recorded response automatically. This requires no code changes and works in CI.
+</Tip>
+
+---
+
+## Common patterns
+
+<Tabs>
+  <Tab title="One search">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+    env = client.search(
+        "node course",
+        providers="mega",
+        kind="folder",
+        min_files=10,
+        sort="files",
+        order="desc",
+        fields="id,name,provider,files,url",
+    )
+    print(f"{env.total} results, showing {len(env.results)}")
+    for row in env.results:
+        print(f"{row.files:>4}  {row.name}")
+    ```
+  </Tab>
+  <Tab title="Paging">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+    for row in client.iterate(
+        "worksheet",
+        max_size="400mb",
+        fields="id,name,provider,size,url",
+        max_rows=500,
+    ):
+        print(row.name, row.human_size)
+
+    print(f"{client.stats['requests']} requests, {client.stats['rows']} rows")
+    ```
+  </Tab>
+  <Tab title="Verify a parameter">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+    report = client.verify("min_mirrors", 2, "worksheet")
+    if not report.honoured:
+        print(f"[{report.verdict}] {report.explain()}")
+    ```
+  </Tab>
+  <Tab title="Diff two drives">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+    report = client.diff(
+        "atlas of human anatomy",
+        left="mega",
+        right="dropbox",
+        key="hash",
+        max_size="400mb",
+    )
+    print(report.explain())
+    for name in report.same_name_different_key:
+        print(f"  title clash: {name!r}")
+    ```
+  </Tab>
+  <Tab title="Dead-row sweep">
+    ```python
+    import csv
+    from meawfy import MeawfyClient, CAPS
+
+    client = MeawfyClient()
+    rows = list(
+        client.iterate(
+            alive=False,
+            sort="checked",
+            order="asc",
+            fields="id,provider,url,checked_at",
+            max_rows=1000,
+        )
+    )
+    with open("dead-links.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["id", "provider", "url", "checked_at"])
+        w.writeheader()
+        for row in rows:
+            w.writerow({k: row.get(k) for k in ["id", "provider", "url", "checked_at"]})
+    print(f"{len(rows)} dead rows written")
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,327 @@
+---
+title: "Query Handbook Recipes R7–R14 Explained"
+sidebarTitle: "Recipes"
+description: "Run the eight ready-made parameter sets from sheet 18 of The Query Handbook, override placeholder dates, and customise any recipe with params_for() or --set."
+---
+
+The recipes on sheet 18 of *The Query Handbook* are eight complete, runnable requests — each one designed around a specific retrieval task. Rather than assembling parameters from scratch, you paste the recipe, swap the search term, and go. The client ships all eight as first-class objects under the codes R7 through R14.
+
+## What a recipe is
+
+A `Recipe` is a frozen dataclass holding a code, a title, a parameter dict, and a note from the handbook. Placeholder strings like `{today-3d}` appear in any recipe that depends on a relative date — they are resolved to real ISO dates at the moment you call `params_for()` or `run_recipe()`, so the recipes continue to return rows long after their Edition 1 print dates have passed.
+
+```python
+from meawfy.recipes import Recipe
+# Recipe(code, title, params, note)
+# params_for() resolves {today-Nd} placeholders and applies your overrides
+```
+
+## `params_for()` — get resolved parameters
+
+`params_for(code, **overrides)` returns the recipe's parameter dict with all placeholders replaced by real dates and any of your keyword arguments applied on top. Setting an override to `None` removes that parameter entirely, giving you the request exactly as printed on sheet 18.
+
+```python
+from meawfy import params_for
+
+# R9 with placeholders resolved to today's dates
+print(params_for("R9"))
+# {
+#   'search_query': 'worksheet',
+#   'max_size': '400mb',
+#   'after': '2026-09-10',        ← resolved from {today-8d}
+#   'checked_after': '2026-09-01', ← resolved from {today-17d}
+#   'min_mirrors': 2,
+#   'dedupe': True,
+#   'sort': 'indexed',
+#   'order': 'desc',
+# }
+
+# Override one value
+print(params_for("R9", max_size="100mb", search_query="lecture notes"))
+
+# Remove checked_after to get the request exactly as printed
+print(params_for("R11", checked_after=None))
+```
+
+## `client.run_recipe()` — run a recipe directly
+
+`run_recipe(code, **overrides)` is the one-call shortcut. It resolves parameters, applies your overrides, and sends the request.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# R9 with a tighter size ceiling
+envelope = client.run_recipe("R9", max_size="100mb", search_query="lecture notes")
+print(f"total: {envelope.total}, rows: {len(envelope.results)}")
+```
+
+## `client.recipe()` — inspect before running
+
+`client.recipe(code)` returns the `Recipe` object itself. Use it to inspect the parameters, read the handbook note, or build a `Query` manually before sending.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+r7 = client.recipe("R7")
+
+print(r7.code)    # R7
+print(r7.title)   # One drive, and only folders that are already collections
+print(r7.note)    # Dropbox, files-first: ...
+print(dict(r7.params))
+# {'search_query': 'course pack', 'providers': 'dropbox', 'kind': 'folder',
+#  'min_files': 50, 'sort': 'files'}
+```
+
+## All eight recipes
+
+| Code | Goal | Key parameters |
+|------|------|----------------|
+| **R7** | One drive, and only folders that are already collections | `providers=dropbox`, `kind=folder`, `min_files=50`, `sort=files` |
+| **R8** | One title across three drives, in a single call | `sort=size`, `per_page=1`, `facets=providers,ext` |
+| **R9** | Small, recent, alive, and confirmed by a second copy | `max_size=400mb`, `after={today-8d}`, `checked_after={today-17d}`, `min_mirrors=2`, `dedupe=true` |
+| **R10** | A finite, ordered answer for somebody else's page | `sort=relevance`, `per_page=100`, `page=3`, `explain=1`, `fields=id,name,provider,size,files,url` |
+| **R11** | Maintenance: recently dead rows, before they vanish | `alive=false`, `checked_after={today-3d}`, `sort=checked`, `order=asc` |
+| **R12** | Two drives, one phrase, and a diff you can trust | `providers=[mega, gdrive]`, `fields=id,hash,mirrors` |
+| **R13** | A Node.js course, sorted by collection size | `providers=mega`, `kind=folder`, `min_files=10`, `sort=files`, `order=desc` |
+| **R14** | Videos with previews, HD and above, sorted by size | `ext=mp4,mkv`, `preview=1`, `resolution=720p`, `sort=size`, `order=desc` |
+
+## Recipe details and examples
+
+<Accordion title="R7 — One drive, and only folders that are already collections">
+  The folder holding fifty files is a real collection; the folder holding one is a file wearing a folder's name. R7 asks for `kind=folder` with a `min_files` floor and sorts by file count so genuine collections rise to the top.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  # Inspect the parameters first
+  print(params_for("R7"))
+  # {'search_query': 'course pack', 'providers': 'dropbox',
+  #  'kind': 'folder', 'min_files': 50, 'sort': 'files'}
+
+  client = MeawfyClient()
+
+  # Run as-is
+  envelope = client.run_recipe("R7")
+
+  # Swap the term and lower the floor
+  envelope = client.run_recipe("R7", search_query="bootcamp", min_files=20)
+  ```
+
+  The same shape works on MEGA — see R13. The difference is the floor: Dropbox folders tend to be shallower.
+</Accordion>
+
+<Accordion title="R8 — One title across three drives, in a single call">
+  Ask for `per_page=1` and read the facets: the single largest copy is in the first row, and the provider and extension breakdown covers the whole indexed set — no paging required.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  print(params_for("R8"))
+  # {'search_query': 'climate report', 'sort': 'size',
+  #  'per_page': 1, 'facets': 'providers,ext'}
+
+  client = MeawfyClient()
+  envelope = client.run_recipe("R8", search_query="atlas of human anatomy")
+
+  # The largest copy
+  if envelope.results:
+      row = envelope.results[0]
+      print(f"largest: {row.name} ({row.human_size}) on {row.provider}")
+
+  # How the drives split the title
+  print(envelope.provider_counts())   # {'mega': 312, 'dropbox': 88, 'gdrive': 21}
+  print(envelope.facet("ext"))        # {'pdf': 289, 'epub': 72, 'zip': 50}
+  ```
+</Accordion>
+
+<Accordion title="R9 — Small, recent, alive, and confirmed by a second copy">
+  Four filters that each remove a different way of wasting time: `max_size` removes unwieldy archives, `after` removes stale rows, `checked_after` removes rows whose liveness has not been verified recently, and `min_mirrors=2` removes one-of-a-kind links.
+
+  The two date parameters carry `{today-8d}` and `{today-17d}` placeholders. The printed Edition 1 dates were 2026-09-10 and 2026-09-01; `params_for()` resolves them relative to today.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+  from datetime import date
+
+  # See the resolved dates
+  resolved = params_for("R9")
+  print(resolved["after"])          # today minus 8 days
+  print(resolved["checked_after"])  # today minus 17 days
+
+  client = MeawfyClient()
+
+  # Tighter constraints: 100 MB ceiling, your own term
+  envelope = client.run_recipe(
+      "R9",
+      search_query="lecture notes",
+      max_size="100mb",
+  )
+
+  # Use a fixed window instead of the placeholder
+  envelope = client.run_recipe(
+      "R9",
+      search_query="worksheet",
+      after="2026-01-01",
+      checked_after=None,       # remove checked_after entirely
+  )
+  ```
+</Accordion>
+
+<Accordion title="R10 — A finite, ordered answer for somebody else's page">
+  A projection (`fields`) at one-tenth of the bytes, `explain=1` to check which filters the endpoint actually applied, and a specific page number for a client that wants reproducible pagination.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  print(params_for("R10"))
+  # {'search_query': 'atlas', 'sort': 'relevance', 'per_page': 100,
+  #  'page': 3, 'explain': 1, 'fields': 'id,name,provider,size,files,url'}
+
+  client = MeawfyClient()
+  envelope = client.run_recipe("R10", search_query="world history", page=1)
+
+  # Read the parse to check which filters acted
+  if envelope.explain:
+      for key, value in envelope.explain.items():
+          print(f"{key}: {value}")
+  ```
+
+  `explain=1` is how you find a filter you misspelled: the parse echoes back terms, filters honoured, filters dropped, and weights applied.
+</Accordion>
+
+<Accordion title="R11 — Maintenance: recently dead rows, before they vanish">
+  Dead rows are kept for 72 hours after detection, then purged from the index permanently. R11 collects them oldest-check-first. `{today-3d}` is the placeholder — it resolves to three days ago at call time.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  print(params_for("R11"))
+  # {'alive': False, 'checked_after': '2026-09-15',  ← 3 days ago
+  #  'sort': 'checked', 'order': 'asc',
+  #  'per_page': 100, 'fields': 'id,provider,url,checked_at'}
+
+  client = MeawfyClient()
+
+  # The convenience wrapper that builds the same query
+  envelope = client.dead_rows(within_hours=72)
+
+  # Or via run_recipe, for closer control
+  envelope = client.run_recipe("R11")
+  for row in envelope.results:
+      print(f"{row.cell('checked_at')}  {row.get('provider')}  {row.get('url')}")
+  ```
+
+  See the [Verification and Diff](/guides/verification-and-diff) guide for the `dead_rows()` helper and the full sweep pattern.
+</Accordion>
+
+<Accordion title="R12 — Two drives, one phrase, and a diff you can trust">
+  Diff on `hash`, never on `name`: a file that appears on both MEGA and Google Drive with the same hash is a genuine shared copy; the same name on both sides with a different hash is a title collision. R12 asks for both drives and the `hash` field so `client.diff()` has what it needs.
+
+  ```python
+  from meawfy import MeawfyClient
+
+  client = MeawfyClient()
+
+  # client.diff() calls the endpoint twice and compares the results
+  report = client.diff(
+      "trading post",
+      left="mega",
+      right="gdrive",
+      key="hash",
+  )
+  print(report.explain())
+  # mega vs gdrive on hash: 12 shared, 88 only in mega, 34 only in gdrive
+  # 5 name(s) appear on both sides with a different hash: ...
+  ```
+
+  See the [Verification and Diff](/guides/verification-and-diff) guide for the full `DiffReport` reference.
+</Accordion>
+
+<Accordion title="R13 — A Node.js course, sorted by collection size">
+  The same shape as R7 but on MEGA and with a lower floor. MEGA folders tend to be deeper and more structured than Dropbox ones.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  print(params_for("R13"))
+  # {'search_query': 'node course', 'providers': 'mega', 'kind': 'folder',
+  #  'min_files': 10, 'sort': 'files', 'order': 'desc'}
+
+  client = MeawfyClient()
+
+  # Swap for any course name — the parameter set stays the same
+  envelope = client.run_recipe("R13", search_query="python bootcamp", min_files=5)
+  for row in envelope.results:
+      print(f"{row.get('files'):>4} files  {row.name}")
+  ```
+</Accordion>
+
+<Accordion title="R14 — Videos with previews, HD and above, sorted by size">
+  `preview=1` is what fills the `preview` object; without it `preview_size` only changes a CDN path that nothing points at, and `sort=has_preview` has nothing to sort on. `resolution=720p` filters on the file's native dimensions, not the thumbnail's.
+
+  ```python
+  from meawfy import MeawfyClient, params_for
+
+  print(params_for("R14"))
+  # {'search_query': 'documentary', 'ext': 'mp4,mkv', 'preview': 1,
+  #  'resolution': '720p', 'sort': 'size', 'order': 'desc'}
+
+  client = MeawfyClient()
+  envelope = client.run_recipe("R14", search_query="lecture", resolution="1080p")
+
+  for row in envelope.results:
+      preview = row.preview   # None if the indexer found no frame
+      if preview:
+          print(f"{preview.size}  {preview.url}")
+  ```
+</Accordion>
+
+## Placeholder dates
+
+Recipes that filter on time carry `{today-Nd}` placeholders rather than literal dates. The placeholders are resolved by `params_for()` and `run_recipe()` at call time, so the recipes keep returning rows regardless of when you run them.
+
+| Placeholder | Resolves to |
+|-------------|-------------|
+| `{today-3d}` | Three days before today (`checked_after` in R11) |
+| `{today-8d}` | Eight days before today (`after` in R9) |
+| `{today-17d}` | Seventeen days before today (`checked_after` in R9) |
+
+To pin a fixed date — or to remove the placeholder entirely — pass it as an override:
+
+```python
+from meawfy import params_for
+
+# Fix the date
+params_for("R9", after="2026-01-01")
+
+# Remove checked_after → the request exactly as printed on sheet 18
+params_for("R11", checked_after=None)
+```
+
+## The `--set KEY=VALUE` CLI pattern
+
+Every recipe parameter can be overridden on the command line with `--set KEY=VALUE`. Setting `KEY=` (empty value) removes the parameter, which returns the request to its printed form.
+
+```bash
+# Run R7 as printed
+python3 -m meawfy recipe R7
+
+# Lower the min_files floor
+python3 -m meawfy recipe R7 --set min_files=20
+
+# Swap the search term
+python3 -m meawfy recipe R9 --set search_query="lecture notes" --set max_size=100mb
+
+# Remove checked_after → the literal printed R11 request
+python3 -m meawfy recipe R11 --set checked_after=
+
+# Walk pages for R13 until 250 rows are collected
+python3 -m meawfy recipe R13 --limit 250 --set search_query="python course"
+```
+
+<Tip>
+The `recipes` command prints all eight recipes with their goals and notes. Run `python3 -m meawfy recipes` to see the table, or add `--json` to get machine-readable output.
+</Tip>

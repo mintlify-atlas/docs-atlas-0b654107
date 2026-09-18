@@ -1,0 +1,239 @@
+---
+title: "Paging and Collecting Multi-Page Results"
+sidebarTitle: "Paging & Collecting"
+description: "Walk the 10,000-row window safely with iterate() and collect(). Understand the cap, the truncated flag, and when to narrow rather than go deeper."
+---
+
+The endpoint serves results one page at a time, and it never tells you when you have reached its limit. The cap is `page × per_page ≤ 10,000` rows — ask for page 101 at 100 rows per page and the endpoint keeps answering, but it silently applies the cap and repeats the last page instead of refusing. The client turns that silent wall into an explicit signal.
+
+## The 10,000-row window
+
+Every search result lives inside a fixed window of at most 10,000 rows. At the default `per_page` of 24, that means up to 416 pages. At the maximum `per_page` of 100, it means up to 100 pages. Attempts to go deeper do not produce an error from the endpoint — they produce misleading rows from inside the cap.
+
+<Warning>
+A `page × per_page` value that exceeds 10,000 does **not** return an empty response. The endpoint answers 200 with rows from inside the window, making a deep page look like a valid result. The client raises `DeepPagingError` before sending such a request so your code cannot be misled.
+</Warning>
+
+```python
+from meawfy import MeawfyClient
+from meawfy.errors import DeepPagingError
+
+client = MeawfyClient()
+
+# page=101 at per_page=100 → 10,100 rows: exceeds the window
+try:
+    envelope = client.search("atlas", page=101, per_page=100)
+except DeepPagingError as exc:
+    print(f"refused: {exc}")
+    # refused: page=101 × per_page=100 = 10,100 > 10,000
+```
+
+`DeepPagingError` is a subclass of `InvalidParameter` and is raised before any network call.
+
+## `client.iterate()` — yield rows across pages
+
+`iterate()` is a generator that walks pages and yields `Result` objects one at a time. It stops naturally when the endpoint returns an empty page, when `max_rows` is reached, or when the next page would exceed the 10,000-row window — whichever comes first.
+
+```python
+def iterate(
+    query=None,
+    *,
+    per_page: int = 100,          # rows per page; capped at 100
+    start_page: int = 1,          # first page to fetch (one-based)
+    max_rows: int | None = None,  # stop after this many rows
+    **params,
+) -> Iterator[Result]: ...
+```
+
+<ParamField path="per_page" type="int" default="100">
+  Rows requested per page. Capped at 100 by the endpoint; values above 100 are silently lowered.
+</ParamField>
+
+<ParamField path="start_page" type="int" default="1">
+  The page number to begin from. Useful when resuming a walk that was interrupted.
+</ParamField>
+
+<ParamField path="max_rows" type="int | None" default="None">
+  Stop yielding after this many rows. When omitted, `iterate()` walks until the endpoint is exhausted or the window cap is hit.
+</ParamField>
+
+<Tabs>
+  <Tab title="Basic walk">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+
+    for row in client.iterate("periodic table", providers="mega"):
+        print(row.name, row.human_size)
+
+    print(f"requests made: {client.stats['requests']}")
+    ```
+  </Tab>
+  <Tab title="Cap the row count">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+
+    rows = list(client.iterate("worksheet", max_rows=250, per_page=100))
+    print(f"collected {len(rows)} rows in {client.stats['requests']} request(s)")
+    ```
+  </Tab>
+  <Tab title="Resume from a page">
+    ```python
+    from meawfy import MeawfyClient
+
+    client = MeawfyClient()
+
+    # Start from page 5, collecting up to 200 more rows
+    for row in client.iterate("atlas", start_page=5, max_rows=200, per_page=100):
+        print(row.id, row.name)
+    ```
+  </Tab>
+</Tabs>
+
+## `client.collect()` — return a `Collection` object
+
+`collect()` runs the same multi-page walk as `iterate()` but buffers every row and returns a single `Collection` dataclass. Use it when you want all rows in memory and also want the metadata about how the walk ended.
+
+```python
+def collect(
+    query=None,
+    *,
+    per_page: int = 100,
+    max_rows: int | None = None,
+    start_page: int = 1,
+    **params,
+) -> Collection: ...
+```
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+result = client.collect("node course", providers="mega", kind="folder", min_files=10)
+
+print(f"total indexed: {result.total}")
+print(f"rows collected: {len(result.rows)}")
+print(f"pages fetched: {result.pages_fetched}")
+print(f"truncated at window: {result.truncated}")
+print(f"total time: {result.took_ms} ms")
+
+if result.advice:
+    for note in result.advice:
+        print(f"advice: {note}")
+```
+
+## The `Collection` dataclass
+
+<ResponseField name="rows" type="tuple[Result, ...]">
+  Every row collected across all pages fetched. Iterate over a `Collection` directly or access `collection.rows`.
+</ResponseField>
+
+<ResponseField name="pages_fetched" type="int">
+  The number of pages the walk actually requested from the endpoint.
+</ResponseField>
+
+<ResponseField name="total" type="int">
+  The total row count the endpoint reported for the query — the full indexed set, not just the rows collected. This is taken from the first page's envelope.
+</ResponseField>
+
+<ResponseField name="truncated" type="bool">
+  `True` when the walk stopped because it reached the 10,000-row window before exhausting all results. When this is `True`, `total` is larger than the number of rows in `rows`.
+</ResponseField>
+
+<ResponseField name="took_ms" type="int">
+  The sum of `took_ms` across every page fetched — the endpoint's own measure of processing time.
+</ResponseField>
+
+<ResponseField name="advice" type="tuple[str, ...]">
+  Human-readable notes set by the client when `truncated` is `True`. Each entry explains the window constraint and recommends narrowing the query.
+</ResponseField>
+
+### The `truncated` flag and `advice`
+
+When `total` exceeds what fits inside the window, `collect()` sets `truncated = True` and populates `advice` with a message like:
+
+```
+12,400 rows exceed the 10,000-row window at per_page=100;
+a narrowed set is always the better answer than a deeper page
+```
+
+<Note>
+`Collection` is iterable and supports `len()`. You can use it directly in a `for` loop: `for row in collection: ...`
+</Note>
+
+## Strategy for large result sets
+
+When `total` is much larger than 10,000, paging deeper is not a solution — the window does not move. The right answer is always to narrow the query so that the set you care about fits inside the window.
+
+<CardGroup cols={2}>
+  <Card title="Add a size ceiling" icon="ruler">
+    `max_size="400mb"` removes large archives and is the single most effective filter on the endpoint.
+  </Card>
+  <Card title="Restrict to one provider" icon="hard-drive">
+    `providers="mega"` cuts the result set to one-third without changing what you are looking for.
+  </Card>
+  <Card title="Use a date window" icon="calendar">
+    `after="2026-01-01"` restricts to recently indexed rows, often the most relevant ones anyway.
+  </Card>
+  <Card title="Add an extension filter" icon="file">
+    `ext="pdf,epub"` removes video and archive noise from document queries immediately.
+  </Card>
+</CardGroup>
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# A wide query — likely truncated
+wide = client.collect("atlas")
+if wide.truncated:
+    print(f"window hit: {wide.total} rows, only {len(wide.rows)} reachable")
+    print(wide.advice[0])
+
+# Narrowed — same phrase, fits in the window
+narrow = client.collect(
+    "atlas",
+    providers="mega",
+    ext="pdf,epub",
+    max_size="500mb",
+    sort="indexed",
+    order="desc",
+)
+print(f"narrowed: {narrow.total} total, {len(narrow.rows)} collected, truncated={narrow.truncated}")
+```
+
+## Handling `DeepPagingError` in manual pagination
+
+If you are constructing page numbers yourself rather than using `iterate()` or `collect()`, catch `DeepPagingError` to know when to stop:
+
+```python
+from meawfy import MeawfyClient
+from meawfy.errors import DeepPagingError
+
+client = MeawfyClient()
+page = 1
+per_page = 50
+
+while True:
+    try:
+        envelope = client.search("worksheet", page=page, per_page=per_page)
+    except DeepPagingError:
+        print(f"reached window limit at page {page}")
+        break
+
+    if not envelope.results:
+        break
+
+    for row in envelope.results:
+        process(row)
+
+    page += 1
+```
+
+<Tip>
+Use `iterate()` instead of a manual loop whenever possible. It handles `DeepPagingError` internally, stops correctly at the window boundary, and produces cleaner code.
+</Tip>

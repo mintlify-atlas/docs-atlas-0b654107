@@ -1,0 +1,249 @@
+---
+title: "Rate Limiting: 120 Requests per Minute"
+sidebarTitle: "Rate Limiting"
+description: "Understand the 120-request sliding window, how RateLimiter paces requests locally, how RetryPolicy handles 429 responses, and how to monitor remaining capacity."
+---
+
+The endpoint allows 120 requests per minute, shared with the site's own front end. The budget is small, and `collect()` over a wide query can spend dozens of requests before the first page of results is even processed. The client paces locally so the wall is rarely reached, but knowing how the system works lets you stay well clear of it.
+
+## The documented limit
+
+The rate limit is a **sliding window** of 120 requests per 60-second period. Every response carries `X-RateLimit-Remaining`, which counts down from 120 toward zero. When the counter reaches zero, the next request receives a `429 Too Many Requests` response with a `Retry-After` header.
+
+| Fact | Value |
+|------|-------|
+| Requests per minute | 120 |
+| Window type | Sliding (not fixed clock-minute) |
+| Header | `X-RateLimit-Remaining` |
+| Over-limit status | `429 Too Many Requests` |
+| `Retry-After` format | Seconds (`60`) or HTTP-date (`Wed, 21 Oct 2026 07:28:00 GMT`) |
+
+<Warning>
+120 requests per minute is the whole budget, not a per-client allocation. The site's own front end uses the same pool. During peak hours `X-RateLimit-Remaining` can reach zero faster than expected.
+</Warning>
+
+## `X-RateLimit-Remaining` header
+
+Every response — including error responses — carries `X-RateLimit-Remaining`. The client reads it after each request and exposes it through two places: `client.remaining` and `client.stats["last_remaining"]`.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+envelope = client.search("periodic table")
+
+print(client.remaining)                    # e.g. 118
+print(client.stats["last_remaining"])      # same value
+```
+
+Reading `remaining` before a burst of calls gives you a live signal for how much headroom you have.
+
+## `429 Too Many Requests` and `Retry-After`
+
+When the window is exhausted, the endpoint responds with HTTP 429. The `Retry-After` header tells you how many seconds to wait before retrying. The client raises `RateLimited` (a subclass of `TransportError`) when it receives a 429 that the retry policy decides not to wait out.
+
+`Retry-After` arrives in one of two formats:
+
+```
+Retry-After: 42
+Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
+```
+
+The client handles both. The integer form is straightforward; the HTTP-date form is converted to a relative offset from the current time.
+
+## How `RateLimiter` works
+
+`RateLimiter` maintains a sliding window of request timestamps in a `deque`. Before each request, `acquire()` checks whether the window is full; if it is, it sleeps until the oldest timestamp falls outside the 60-second window.
+
+```python
+class RateLimiter:
+    def __init__(self, limit=120, window=60.0): ...
+
+    def acquire(self) -> None:
+        """Wait for a free slot, then claim it."""
+
+    def observe(self, headers) -> int | None:
+        """Record X-RateLimit-Remaining from the response headers."""
+
+    def block(self, seconds: float) -> None:
+        """Block all further acquires for this many seconds (used after a 429)."""
+```
+
+The three methods work together:
+
+1. **`acquire()`** is called before every request. It waits until the local window has a free slot, then records the current time and returns.
+2. **`observe(headers)`** is called after every response. It reads `X-RateLimit-Remaining` and stores it so `client.remaining` always reflects the latest server-side count.
+3. **`block(seconds)`** is called when a `429` is received. It sets a hard floor on when the next `acquire()` can proceed, regardless of how many local slots are free.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# The limiter is accessible on the client instance
+limiter = client.limiter
+print(limiter.limit)       # 120
+print(limiter.window)      # 60.0
+print(limiter.remaining)   # None before the first call; int after
+```
+
+## `client.remaining` property
+
+`client.remaining` is the last `X-RateLimit-Remaining` value seen from the endpoint. It is `None` before the first request.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+client.search("test query")   # makes one request
+
+if client.remaining is not None and client.remaining < 10:
+    print("low on remaining budget — slow down")
+```
+
+## `client.stats` — full request accounting
+
+`client.stats` is a dict that accumulates counters across the lifetime of the client instance.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+client.collect("atlas", max_rows=500)
+
+print(client.stats)
+# {
+#   'requests':       6,        ← successful responses
+#   'attempts':       6,        ← total calls including retried ones
+#   'retries':        0,        ← how many retries were needed
+#   'waited_ms':      0,        ← milliseconds spent waiting on retries
+#   'rows':         500,        ← total rows received across all requests
+#   'last_remaining': 114,      ← X-RateLimit-Remaining from the last response
+#   'last_took_ms':   38,       ← took_ms from the last envelope
+#   'last_url':      '...',     ← URL of the last request
+# }
+```
+
+<ResponseField name="requests" type="int">
+  Successful responses received (HTTP 200 with a valid JSON body).
+</ResponseField>
+
+<ResponseField name="attempts" type="int">
+  Total calls made, including retried attempts that did not produce a successful response.
+</ResponseField>
+
+<ResponseField name="retries" type="int">
+  How many times a failed attempt was retried (attempts minus requests when all retries eventually succeeded).
+</ResponseField>
+
+<ResponseField name="waited_ms" type="int">
+  Total milliseconds spent sleeping in retry waits. Does not include time spent in `acquire()` local pacing.
+</ResponseField>
+
+<ResponseField name="rows" type="int">
+  Total `Result` objects received across all successful responses.
+</ResponseField>
+
+<ResponseField name="last_remaining" type="int | None">
+  The `X-RateLimit-Remaining` value from the most recent response.
+</ResponseField>
+
+<ResponseField name="last_took_ms" type="int | None">
+  The `took_ms` value from the most recent envelope — the endpoint's own measure of processing time.
+</ResponseField>
+
+## `RetryPolicy` integration
+
+When a `429` is received, the `_retry_wait()` method on the client decides whether to wait or give up. The decision tree is:
+
+1. If `attempt >= max_attempts`, give up and raise `RateLimited`.
+2. If `Retry-After` is longer than `RetryPolicy.max_retry_after` (default 60 s), give up — a window that long is a signal to stop, not to wait.
+3. Otherwise wait for `Retry-After` seconds (clamped to `max_retry_after`), then try again.
+
+```python
+from meawfy import MeawfyClient
+from meawfy.client import RetryPolicy
+
+# Custom policy: give up faster, accept longer waits
+policy = RetryPolicy(
+    max_attempts=2,         # first try + one retry
+    max_retry_after=120.0,  # wait up to 120 s on a 429
+    deadline=30.0,          # but never more than 30 s total for one call
+)
+client = MeawfyClient(retry=policy)
+```
+
+<Note>
+`5xx` and dropped connections use exponential backoff with jitter (`base_delay * 2^(attempt-1)`, up to `max_delay`). A `429` always uses `Retry-After` directly — it does not use the backoff formula.
+</Note>
+
+## `--rate-limit N` and `--no-throttle` CLI flags
+
+```bash
+# Lower the local ceiling to 60 requests per minute
+python3 -m meawfy search "atlas" --rate-limit 60
+
+# Disable local pacing entirely (a 429 still triggers a Retry-After wait)
+python3 -m meawfy search "atlas" --no-throttle
+
+# Combine a lower ceiling with a longer timeout
+python3 -m meawfy recipe R9 --rate-limit 30 --timeout 30
+```
+
+`--no-throttle` sets the local limit to an effectively infinite value (`10^9`). The client will still respect `Retry-After` when the endpoint sends a 429.
+
+## `MEAWFY_RATE_LIMIT` environment variable
+
+Set `MEAWFY_RATE_LIMIT` to an integer to override the default local ceiling of 120 for all clients created in the process, without changing any code.
+
+```bash
+# Slow the whole process down to 30 requests per minute
+MEAWFY_RATE_LIMIT=30 python3 my_script.py
+```
+
+```python
+import os
+from meawfy import MeawfyClient
+
+os.environ["MEAWFY_RATE_LIMIT"] = "30"
+client = MeawfyClient()   # picks up the variable
+print(client.limiter.limit)   # 30
+```
+
+The variable is read at `MeawfyClient.__init__` time. An explicit `requests_per_minute` argument always takes precedence.
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="Read remaining before a burst" icon="gauge">
+    Check `client.remaining` before making many requests. If it is below the number you plan to make, wait or narrow the query.
+  </Card>
+  <Card title="Narrow queries instead of retrying" icon="filter">
+    A `429` means the endpoint wants you to stop. Add `max_size`, `providers`, `ext`, or a date window to reduce the number of pages a `collect()` needs.
+  </Card>
+  <Card title="Pace locally" icon="clock">
+    The default 120-request local ceiling is the documented limit. If you share a process with other callers, lower it with `--rate-limit` or `MEAWFY_RATE_LIMIT`.
+  </Card>
+  <Card title="Use stats to audit spend" icon="chart-bar">
+    Log `client.stats` after a batch job. High `retries` or `waited_ms` values indicate the queries are too broad for the available budget.
+  </Card>
+</CardGroup>
+
+```python
+from meawfy import MeawfyClient
+from meawfy.errors import RateLimited
+
+client = MeawfyClient(requests_per_minute=60)  # conservative ceiling
+
+try:
+    collection = client.collect("atlas", max_rows=1000)
+except RateLimited as exc:
+    print(f"rate limited after {client.stats['requests']} requests")
+    print(f"retry after: {exc.retry_after}s")
+    raise
+
+print(f"done: {client.stats['requests']} requests, "
+      f"{client.stats['retries']} retries, "
+      f"{client.stats['waited_ms']} ms waited, "
+      f"last remaining: {client.stats['last_remaining']}")
+```

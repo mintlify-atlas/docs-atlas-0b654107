@@ -1,0 +1,293 @@
+---
+title: "RetryPolicy — Retry Behaviour for the Meawfy Client"
+sidebarTitle: "RetryPolicy"
+description: "Reference for the RetryPolicy dataclass: all fields, backoff formula, Retry-After handling, deadline bounds, and code examples for aggressive and fast-fail policies."
+---
+
+`RetryPolicy` is a frozen dataclass that controls every aspect of what the client does when a request fails. Its defaults are production-sensible: four total attempts (first try plus three retries), exponential backoff from 0.5 s up to 8 s with a small random jitter, and a `max_retry_after` of 60 s that acts as a stop signal rather than a wait when the endpoint asks for longer. You only need to construct one directly when the defaults don't fit — either to be more aggressive about retrying, or to fail fast.
+
+```python
+from meawfy import MeawfyClient, RetryPolicy
+
+# Aggressive: 6 attempts, longer waits, 2-minute deadline
+policy = RetryPolicy(max_attempts=6, base_delay=1.0, max_delay=30.0, deadline=120.0)
+client = MeawfyClient(retry=policy)
+```
+
+---
+
+## Class definition
+
+```python
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts:    int                  = 4
+    base_delay:      float                = 0.5
+    max_delay:       float                = 8.0
+    max_retry_after: float                = 60.0
+    jitter:          float                = 0.25
+    deadline:        float | None         = None
+    rand:            Callable[[], float]  = random.random
+```
+
+All fields are keyword arguments with defaults. The dataclass is frozen — instances are immutable.
+
+---
+
+## Fields
+
+<ParamField path="max_attempts" type="int" default="4">
+  The maximum number of attempts including the first try. `max_attempts=4` means the first attempt plus up to three retries. When `max_attempts=1`, the client never retries — it raises on the first failure. The `MeawfyClient` constructor turns `max_retries` into `max_attempts=max_retries + 1`, so `max_retries=3` and `RetryPolicy(max_attempts=4)` are equivalent.
+</ParamField>
+
+<ParamField path="base_delay" type="float" default="0.5">
+  The base wait time in seconds for the first retry. Each subsequent retry doubles this, subject to `max_delay`. With the default `0.5`, the waits before attempts 2, 3, and 4 are approximately `0.5 s`, `1.0 s`, and `2.0 s` before jitter.
+</ParamField>
+
+<ParamField path="max_delay" type="float" default="8.0">
+  The ceiling on the exponential backoff wait in seconds. Once the formula `base_delay × 2^(attempt-1)` reaches `max_delay`, further retries all wait at most `max_delay` seconds (plus jitter). Prevents runaway waits on a long retry sequence.
+</ParamField>
+
+<ParamField path="max_retry_after" type="float" default="60.0">
+  The maximum `Retry-After` value (in seconds) that the policy will honour. When the endpoint sends a `429` with a `Retry-After` header longer than `max_retry_after`, `gives_up` returns `True` and the client raises `RateLimited` immediately rather than sleeping for that duration. This is a stop signal, not an override: the client does not wait `max_retry_after` in place of the longer value — it gives up entirely.
+</ParamField>
+
+<ParamField path="jitter" type="float" default="0.25">
+  The maximum fractional jitter added on top of the backoff. The actual wait is `backoff(attempt) × (1.0 + jitter × rand())`. With the default `0.25`, the wait can be up to 25% longer than the pure exponential value. Jitter prevents a fleet of clients from coming back in lockstep after a shared outage.
+</ParamField>
+
+<ParamField path="deadline" type="float | None" default="None">
+  The wall-clock seconds that bound the entire logical call, waits included. Before sleeping for the calculated wait, the client checks whether `elapsed + wait > deadline`; if so, it raises immediately rather than sleeping. A `None` deadline means no overall time limit — only `max_attempts` bounds the retry loop.
+</ParamField>
+
+<ParamField path="rand" type="Callable[[], float]" default="random.random">
+  A callable returning a float in `[0, 1)` used for jitter. The default is `random.random`. Swap it for a deterministic function (e.g. `lambda: 0.0`) in tests to make waits predictable.
+</ParamField>
+
+---
+
+## Methods
+
+### `backoff`
+
+```python
+def backoff(self, attempt: int) -> float:
+```
+
+Returns the pure exponential component of the wait before the next attempt — without jitter. The formula is `min(base_delay × 2^max(0, attempt-1), max_delay)`.
+
+```python
+p = RetryPolicy(base_delay=0.5, max_delay=8.0)
+for i in range(1, 6):
+    print(f"attempt {i}: backoff = {p.backoff(i):.1f}s")
+# attempt 1: backoff = 0.5s
+# attempt 2: backoff = 1.0s
+# attempt 3: backoff = 2.0s
+# attempt 4: backoff = 4.0s
+# attempt 5: backoff = 8.0s
+```
+
+### `wait_for`
+
+```python
+def wait_for(self, attempt: int, retry_after: float | None = None) -> float:
+```
+
+Returns the seconds to sleep before the next attempt. When `retry_after` is supplied (a 429 response), it returns `min(max(0.0, retry_after), max_retry_after)` — clamped to the policy's ceiling. When `retry_after` is `None` (a 5xx or dropped connection), it returns `backoff(attempt) × (1.0 + jitter × rand())`.
+
+```python
+p = RetryPolicy()
+
+# 5xx or connection drop: exponential backoff with jitter
+wait = p.wait_for(attempt=1)       # ~0.5–0.625 s
+
+# 429 with Retry-After: clamped to max_retry_after
+wait = p.wait_for(attempt=1, retry_after=45.0)   # 45.0 s
+wait = p.wait_for(attempt=1, retry_after=120.0)  # 60.0 s (clamped)
+```
+
+### `gives_up`
+
+```python
+def gives_up(self, retry_after: float | None) -> bool:
+```
+
+Returns `True` when the `Retry-After` value from a 429 response exceeds `max_retry_after`. This is the signal for the client to raise `RateLimited` without sleeping. Returns `False` for any non-429 error (`retry_after=None`), and `False` when the window is within the policy's tolerance.
+
+```python
+p = RetryPolicy(max_retry_after=60.0)
+p.gives_up(None)     # False — not a 429
+p.gives_up(45.0)     # False — window is within tolerance
+p.gives_up(61.0)     # True  — window exceeds max_retry_after; raise immediately
+```
+
+---
+
+## How RetryPolicy interacts with 429
+
+When the endpoint returns `429 Too Many Requests`, the response contains a `Retry-After` header in one of the two forms the HTTP spec allows: a delta-seconds integer (`Retry-After: 30`) or an HTTP-date (`Retry-After: Mon, 01 Sep 2026 12:00:00 GMT`). The client's `urllib_transport` parses both and raises `RateLimited(retry_after=seconds)`.
+
+The client then calls `policy.gives_up(retry_after)`. If `True`, it re-raises immediately — the endpoint is asking to wait longer than the policy tolerates, and retrying would exceed `max_retry_after`. If `False`, it calls `policy.wait_for(attempt, retry_after)`, which clamps the value to `max_retry_after`, calls `limiter.block(wait)` to extend the local rate-limit window, then sleeps.
+
+```python
+# The endpoint says wait 90 seconds; the policy's ceiling is 60 s.
+# gives_up returns True → RateLimited is raised immediately.
+policy = RetryPolicy(max_retry_after=60.0)
+
+# The endpoint says wait 20 seconds; the policy allows it.
+# wait_for returns 20.0 → the client sleeps 20 s then retries.
+policy = RetryPolicy(max_retry_after=60.0)
+```
+
+<Note>
+The local `RateLimiter` paces requests to stay under 120/minute before they reach the endpoint, so a `429` in production means the pacing fell behind or another caller shared the limit. The `requests_per_minute` constructor argument controls the local ceiling.
+</Note>
+
+---
+
+## How RetryPolicy interacts with 5xx and dropped connections
+
+A `5xx` response or a `TransportError` without a status code (DNS failure, TCP reset, timeout) is treated as a transient error. The client calls `policy.wait_for(attempt)` with no `retry_after` argument, which returns the jittered exponential value. Any 4xx other than 429 is **not** retried — the same request will produce the same error, so retrying is pointless.
+
+```python
+# Wait sequence for a 503 or connection drop with default policy:
+# attempt 1 fails → wait ~0.5–0.625 s → attempt 2
+# attempt 2 fails → wait ~1.0–1.25 s  → attempt 3
+# attempt 3 fails → wait ~2.0–2.5 s   → attempt 4
+# attempt 4 fails → raise TransportError (max_attempts exhausted)
+```
+
+---
+
+## How deadline bounds total time
+
+When `deadline` is set, the client calculates `elapsed + wait` before every sleep. If the sum exceeds `deadline`, it raises immediately — even if `max_attempts` has not been reached. The deadline is measured from the moment the first attempt starts and includes all wait time, so `deadline=10.0` means the entire call from first try to final raise completes within 10 seconds.
+
+```python
+policy = RetryPolicy(max_attempts=10, deadline=5.0)
+# If the first attempt takes 1 s and fails, and the backoff says "wait 4 s",
+# elapsed (1 s) + wait (4 s) = 5 s, which equals the deadline —
+# the client gives up rather than sleeping.
+```
+
+---
+
+## Passing RetryPolicy to MeawfyClient
+
+Pass the policy via the `retry=` argument. This replaces the internal policy built from `max_retries` and `deadline`. The `max_retries` argument must be at its default value of `3` and `deadline` must be `None` when `retry=` is used; the constructor raises `InvalidParameter` if both are supplied with non-default values.
+
+```python
+from meawfy import MeawfyClient, RetryPolicy
+
+# Replace max_retries and deadline entirely
+client = MeawfyClient(retry=RetryPolicy(max_attempts=5, deadline=30.0))
+
+# This raises InvalidParameter — cannot mix retry= with max_retries=
+client = MeawfyClient(retry=RetryPolicy(), max_retries=5)  # ❌
+```
+
+---
+
+## Code examples
+
+<Tabs>
+  <Tab title="Aggressive retry">
+    ```python
+    from meawfy import MeawfyClient, RetryPolicy
+
+    # Six attempts total (first try + 5 retries)
+    # Wait up to 2 minutes for a long Retry-After
+    # Give up if the whole call takes more than 3 minutes
+    policy = RetryPolicy(
+        max_attempts=6,
+        base_delay=1.0,
+        max_delay=30.0,
+        max_retry_after=120.0,
+        jitter=0.1,
+        deadline=180.0,
+    )
+    client = MeawfyClient(retry=policy)
+    env = client.search("periodic table", providers="mega")
+    ```
+  </Tab>
+  <Tab title="Fast-fail">
+    ```python
+    from meawfy import MeawfyClient, RetryPolicy
+
+    # Two total attempts (one retry), no waiting for long windows.
+    # Any Retry-After over 5 s causes an immediate raise.
+    # Entire call must complete within 10 seconds.
+    policy = RetryPolicy(
+        max_attempts=2,
+        base_delay=0.25,
+        max_delay=1.0,
+        max_retry_after=5.0,
+        jitter=0.0,
+        deadline=10.0,
+    )
+    client = MeawfyClient(retry=policy)
+
+    from meawfy import RateLimited, TransportError
+    try:
+        env = client.search("worksheet")
+    except RateLimited:
+        print("rate limited and max_retry_after exceeded — try again later")
+    except TransportError as exc:
+        print(f"network error: {exc}")
+    ```
+  </Tab>
+  <Tab title="No retries">
+    ```python
+    from meawfy import MeawfyClient, RetryPolicy
+
+    # max_attempts=1: first failure raises immediately.
+    # Useful for a health check or a test that must not block.
+    policy = RetryPolicy(max_attempts=1)
+    client = MeawfyClient(retry=policy)
+    ```
+  </Tab>
+  <Tab title="Deterministic in tests">
+    ```python
+    from meawfy import MeawfyClient, RetryPolicy, TransportResponse
+
+    call_count = 0
+
+    def flaky_transport(url: str) -> TransportResponse:
+        global call_count
+        call_count += 1
+        if call_count < 3:
+            from meawfy import TransportError
+            raise TransportError("simulated 503", status=503)
+        return TransportResponse(
+            status=200,
+            payload={"results": [], "total": 0, "page": 1, "per_page": 24, "pages": 0, "took_ms": 1, "query": {}},
+            headers={"x-ratelimit-remaining": "120"},
+        )
+
+    # Zero jitter + no-op sleep = deterministic and instant
+    policy = RetryPolicy(max_attempts=4, jitter=0.0, rand=lambda: 0.0)
+    client = MeawfyClient(
+        transport=flaky_transport,
+        sleep=lambda s: None,
+        retry=policy,
+    )
+    env = client.search("test")
+    assert call_count == 3   # two failures then a success
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Backoff table
+
+The table below shows the wait range (without jitter vs. with maximum jitter) for each retry attempt using the default policy (`base_delay=0.5`, `max_delay=8.0`, `jitter=0.25`).
+
+| Attempt | Backoff (pure) | Wait range (with 25% jitter) |
+|--------:|:--------------:|:----------------------------:|
+| 1 → 2   | 0.50 s         | 0.50 – 0.63 s                |
+| 2 → 3   | 1.00 s         | 1.00 – 1.25 s                |
+| 3 → 4   | 2.00 s         | 2.00 – 2.50 s                |
+| 4 → 5   | 4.00 s         | 4.00 – 5.00 s                |
+| 5 → 6   | 8.00 s         | 8.00 – 10.00 s               |
+| 6+      | 8.00 s (cap)   | 8.00 – 10.00 s               |

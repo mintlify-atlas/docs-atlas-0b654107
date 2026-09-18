@@ -1,0 +1,153 @@
+---
+title: "CLI Overview — Meawfy Command-Line Interface"
+sidebarTitle: "CLI Overview"
+description: "Run searches, inspect parameters, execute recipes, and verify endpoint behaviour from your terminal with python -m meawfy — no installation required."
+---
+
+The Meawfy CLI exposes every documented endpoint parameter as a flag, turns the eight recipes from sheet 18 into first-class commands, and gives the two failure modes that scripts hit most often (`verify` and `dead`) their own verbs. It ships inside the package itself — no entry-point script to install, no `PATH` changes needed.
+
+## Entry point
+
+Run the CLI with either of these forms:
+
+```bash
+python -m meawfy COMMAND [options]
+python3 -m meawfy COMMAND [options]
+```
+
+From the project directory directly:
+
+```bash
+cd query-handbook/meawfy-client
+python3 -m meawfy --help
+```
+
+From anywhere, without installing the package:
+
+```bash
+PYTHONPATH=/path/to/query-handbook/meawfy-client python3 -m meawfy --help
+```
+
+<Note>
+The CLI requires Python 3.9 or newer. It has no third-party dependencies — `urllib` handles the transport and `argparse` handles the flags.
+</Note>
+
+## Commands
+
+Every command accepts the global options described below. Commands that accept a query also accept all 50 documented endpoint parameters as flags.
+
+| Command | What it does | Requests made |
+|---|---|---|
+| `search QUERY` | Run one request and print matching rows, or walk pages with `--limit N` | 1, or more with `--limit` |
+| `url QUERY` | Print the URL a request would call and show query advice. No network call | 0 |
+| `params` | Print the parameter registry: group, name, default, status, and description | 0 |
+| `recipes` | List R7–R14 with their goal and note | 0 |
+| `recipe CODE` | Run one recipe, with optional `--set KEY=VALUE` overrides | 1, or more with `--limit` |
+| `verify NAME VALUE` | Send the request with and without a parameter, then diff the echo | 2 |
+| `diff QUERY` | Compare two drives on a content key (default `hash`) | 2 |
+| `dead` | Fetch rows detected dead within the grace window (default 72 hours) | 1 |
+| `record FILE QUERY` | Run a query and write its envelope body to `FILE` for `--fixture` replay | 1 |
+
+## Global options
+
+These flags are accepted by every command and control the HTTP client, rate limiting, and output format.
+
+<Accordion title="--base-url URL">
+Override the endpoint host or full URL. Useful for pointing at a local proxy or a saved fixture server. Defaults to `https://meawfy.com/internal/api/results.json`. Set via environment variable `MEAWFY_BASE_URL`.
+</Accordion>
+
+<Accordion title="--fixture FILE">
+Serve a response recorded with `record` instead of calling the live endpoint. The replay transport reads the saved envelope body and returns it unchanged. See `record` for how to create a fixture file. Set via environment variable `MEAWFY_FIXTURE`.
+</Accordion>
+
+<Accordion title="--timeout SECONDS">
+Per-request timeout in seconds. The default is 15 seconds. Does not include retry waits — each attempt gets its own timeout window. Set via environment variable `MEAWFY_TIMEOUT`.
+</Accordion>
+
+<Accordion title="--rate-limit N">
+Local ceiling in requests per minute. The default is 120, which matches the endpoint's documented limit. The client enforces this as a sliding window before sending each request, in addition to honouring any `Retry-After` header. Set via environment variable `MEAWFY_RATE_LIMIT`.
+</Accordion>
+
+<Accordion title="--no-throttle">
+Disable local pacing entirely. The client still honours a `429` with `Retry-After` when the endpoint sends one, but it will not slow down on its own. Use this only when you know the request rate is well below the limit.
+</Accordion>
+
+<Accordion title="--max-retries N">
+How many times to retry a single request for `429`, `5xx`, or dropped-connection failures. The default is 3. Any other status fails immediately, because the same request gets the same answer.
+</Accordion>
+
+<Accordion title="--deadline SECONDS">
+Give up on one logical call once this many seconds have elapsed, including all retry waits. A `Retry-After` longer than 60 seconds counts as a stop signal rather than a wait. Without a deadline, retries are only bounded by `--max-retries`.
+</Accordion>
+
+<Accordion title="--json">
+Print raw JSON instead of the plain-text table. For `search` this is the envelope payload; for `verify` and `diff` it is the report dataclass; for `params` it is the parameter registry as a list. Useful for piping output to `jq`.
+</Accordion>
+
+<Accordion title="--quiet">
+Suppress advice notes, warning lines, and echo diagnostics written to stderr. Hard errors (exit code 2) are always printed. Does not affect stdout output.
+</Accordion>
+
+## Environment variables
+
+All four environment variables are read at startup. A command-line flag takes precedence over the corresponding variable when both are present.
+
+| Variable | Flag equivalent | Default |
+|---|---|---|
+| `MEAWFY_BASE_URL` | `--base-url` | `https://meawfy.com/internal/api/results.json` |
+| `MEAWFY_FIXTURE` | `--fixture FILE` | — (disabled) |
+| `MEAWFY_TIMEOUT` | `--timeout` | `15` seconds |
+| `MEAWFY_RATE_LIMIT` | `--rate-limit` | `120` requests/minute |
+
+```bash
+# Point every CLI call at a local proxy
+export MEAWFY_BASE_URL=http://localhost:8080/results.json
+
+# Replay a saved fixture without --fixture on every command
+export MEAWFY_FIXTURE=fixtures/periodic-table.json
+
+# Slow down to 30 requests per minute in a long-running script
+export MEAWFY_RATE_LIMIT=30
+
+# Short timeout for a connectivity check
+export MEAWFY_TIMEOUT=5
+```
+
+## Exit codes
+
+Scripts can branch on the exit code to distinguish success from different categories of failure.
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. The command completed normally. |
+| `2` | A `MeawfyError` was raised: an invalid parameter, a body-level error from the endpoint, or a transport failure. The error message is printed to stderr. |
+| `4` | No rows. Returned by `dead` always, and by `search --fail-on-empty` when the result set is empty. |
+| `5` | `verify`: the index did not honour the tested parameter. The name was sent and acknowledged in the echo, but the result set did not change. |
+| `130` | Interrupted. A `KeyboardInterrupt` was caught (Ctrl-C). |
+
+```bash
+python3 -m meawfy search "periodic table" -p mega --fail-on-empty
+if [ $? -eq 4 ]; then
+  echo "No rows found on MEGA for this query."
+fi
+```
+
+## Using PYTHONPATH
+
+Because the CLI is a standard `python -m` module entry point, you can run it from any directory without installing the package, as long as Python can find the `meawfy` package directory.
+
+```bash
+# Permanently in your shell profile
+export PYTHONPATH=/path/to/query-handbook/meawfy-client
+
+# Inline for a single command
+PYTHONPATH=/path/to/query-handbook/meawfy-client python3 -m meawfy search "atlas"
+
+# From inside the repo root (the package directory is on the implicit path)
+cd /path/to/query-handbook/meawfy-client
+python3 -m meawfy params --load-bearing
+```
+
+<Tip>
+If you have multiple projects using this package, pin the `PYTHONPATH` to the version you tested against and store a fixture alongside your script with `record`. The endpoint is unversioned — a saved fixture is the only reliable regression baseline.
+</Tip>

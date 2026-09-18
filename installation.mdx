@@ -1,0 +1,256 @@
+---
+title: "Installation, Setup, and Environment Configuration"
+sidebarTitle: "Installation"
+description: "Run Meawfy Client in-place with PYTHONPATH, copy the package directory, configure the four environment variables, and verify the setup."
+---
+
+Meawfy Client requires no packaging step and no external dependencies. The transport is `urllib`, the CLI is `argparse`, and the tables are plain strings — everything ships with Python 3.9 and newer. You can run the package in place from a cloned repository, or copy the `meawfy/` directory into any project that needs it.
+
+## Requirements
+
+Python 3.9 or newer. Nothing else.
+
+```bash
+python3 --version
+# Python 3.9.x or higher
+```
+
+The package imports `urllib.request`, `urllib.error`, `urllib.parse`, `argparse`, `json`, `os`, `re`, `time`, `random`, `pathlib`, `datetime`, `dataclasses`, and `collections` from the standard library. No third-party packages are used or required.
+
+## Usage modes
+
+<Tabs>
+
+<Tab title="In-place (recommended)">
+
+Clone the repository and run the module directly. Python will find the `meawfy` package inside the cloned directory:
+
+```bash
+git clone https://github.com/novodevo/meawfy-client.git
+cd meawfy-client
+python3 -m meawfy --help
+```
+
+If you need to run it from a different working directory — for example, if the repository lives inside a larger `query-handbook/` tree — use `PYTHONPATH`:
+
+```bash
+PYTHONPATH=/path/to/meawfy-client python3 -m meawfy --help
+```
+
+Or set `PYTHONPATH` once in your shell configuration and use it everywhere:
+
+```bash
+export PYTHONPATH="/path/to/meawfy-client:$PYTHONPATH"
+python3 -m meawfy params --status contract
+```
+
+In-place use is the approach the handbook recommends: the package is not versioned on PyPI, the endpoint is unversioned itself, and updating by pulling the repository keeps everything in sync.
+
+</Tab>
+
+<Tab title="Copied package directory">
+
+If you want to import `meawfy` from inside another project without adding a `PYTHONPATH` entry, copy the `meawfy/` directory into your project:
+
+```bash
+cp -r /path/to/meawfy-client/meawfy ./meawfy
+```
+
+Then import it as normal:
+
+```python
+from meawfy import MeawfyClient, Query
+```
+
+This works because the package is stdlib-only — there is nothing to resolve outside of its own directory. The trade-off is that you own the copy: updates require a manual sync.
+
+<Warning>
+Copying the directory works, but you lose the connection to the upstream repository. If the endpoint renames a parameter (it is unversioned and will not announce changes), you will need to re-copy or apply the patch manually. In-place use via `PYTHONPATH` is easier to keep current.
+</Warning>
+
+</Tab>
+
+</Tabs>
+
+## Verifying the installation
+
+Run two commands that make no network calls. The first checks that the CLI is importable and the `argparse` setup is intact. The second prints the seven load-bearing parameters and confirms the registry passes its internal assertions (the module asserts `len(PARAMS) == 50` on import):
+
+```bash
+# Zero network requests, confirms the package is importable
+python3 -m meawfy params --status contract
+```
+
+Expected output lists the seven `contract`-status parameters: `search_query`, `q`, `providers`, `provider`, `ext`, `license`, `min_size`, `max_size`, `min_files`, `after`, `before`, `alive`, `dedupe`, `sort`, `order`, `page`, `per_page`, and `fields`.
+
+```bash
+# Also zero network requests — lists only the load-bearing subset
+python3 -m meawfy params --load-bearing
+```
+
+Expected output lists exactly: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`.
+
+To confirm the transport layer works end-to-end, print a URL without sending it:
+
+```bash
+python3 -m meawfy url "periodic table" -p mega --sort size -o desc
+```
+
+This builds a `Query` object, validates all parameters, and prints the full URL. No network call is made. If this command raises an `InvalidParameter` or `UnknownParameter`, the installation is intact but the arguments need fixing — those errors are raised before any request is sent.
+
+## Environment variables
+
+All four environment variables are optional. When set, they override the corresponding constructor argument in `MeawfyClient`. When unset, the client uses its documented defaults.
+
+<ParamField path="MEAWFY_BASE_URL" type="string">
+  Override the endpoint URL. Accepts the full endpoint, just the hostname, or a hostname with a custom path.
+
+  ```bash
+  # Full endpoint
+  export MEAWFY_BASE_URL="https://meawfy.com/internal/api/results.json"
+
+  # Just the hostname — the client appends /internal/api/results.json
+  export MEAWFY_BASE_URL="https://meawfy.com"
+  ```
+
+  The client's `resolve_base_url()` function handles all three forms: a full endpoint URL, a hostname, or nothing (uses the default). This variable is most useful when pointing the client at a local fixture server or a staging environment.
+</ParamField>
+
+<ParamField path="MEAWFY_FIXTURE" type="string">
+  Path to a recorded response file. When set, every request made by `MeawfyClient` is answered with the recorded body instead of hitting the network. The file must be a JSON file written by `client.save_envelope()` or `python3 -m meawfy record`.
+
+  ```bash
+  export MEAWFY_FIXTURE="fixtures/periodic-table.json"
+  python3 -m meawfy search "periodic table"
+  # No network call — the fixture is replayed
+  ```
+
+  The equivalent in Python:
+
+  ```python
+  from meawfy import MeawfyClient, replay_transport
+
+  client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
+  ```
+
+  <Note>
+  A replayed envelope echoes the recorded `query` object unchanged. `echo_report` will report every parameter as honoured regardless of what you send against the fixture. This is intentional — a fixture is a regression baseline, not a live check.
+  </Note>
+</ParamField>
+
+<ParamField path="MEAWFY_TIMEOUT" type="number" default="15">
+  Per-request timeout in seconds. The default is 15 seconds. Increase this if you are running in an environment with high latency, decrease it for health checks.
+
+  ```bash
+  export MEAWFY_TIMEOUT="30"
+  ```
+
+  The equivalent constructor argument:
+
+  ```python
+  client = MeawfyClient(timeout=30)
+  ```
+</ParamField>
+
+<ParamField path="MEAWFY_RATE_LIMIT" type="integer" default="120">
+  Local requests-per-minute ceiling. The endpoint's documented limit is 120 requests per minute, shared with the site's own front end. Set this lower to be conservative, or to leave headroom for other concurrent callers.
+
+  ```bash
+  # Halve the local budget to leave room for other callers
+  export MEAWFY_RATE_LIMIT="60"
+  ```
+
+  The equivalent constructor argument:
+
+  ```python
+  client = MeawfyClient(requests_per_minute=60)
+  ```
+
+  <Warning>
+  120 requests per minute is the total budget shared with the site's own front end. `collect()` over a wide query can spend dozens of requests. Read `client.remaining` (the last `X-RateLimit-Remaining` seen) and pace locally. A `429` means the endpoint wants you to stop, not retry harder.
+  </Warning>
+</ParamField>
+
+## Constructor arguments reference
+
+When you need finer control than environment variables provide, pass arguments directly to `MeawfyClient`:
+
+```python
+from meawfy import MeawfyClient, RetryPolicy
+
+client = MeawfyClient(
+    base_url=None,            # full endpoint or just the host; env MEAWFY_BASE_URL
+    timeout=None,             # seconds per request, default 15; env MEAWFY_TIMEOUT
+    max_retries=3,            # for 429, 5xx and dropped connections
+    requests_per_minute=None, # local ceiling, default 120; env MEAWFY_RATE_LIMIT
+    user_agent=None,          # custom User-Agent header
+    headers=None,             # extra headers added to every request
+    transport=None,           # inject a custom transport: (url) -> TransportResponse
+    sleep=None,               # inject a custom sleep function, useful in tests
+    retry=None,               # a RetryPolicy, instead of max_retries and deadline
+    deadline=None,            # seconds for one call, all waits included
+)
+```
+
+`retry` and `max_retries`/`deadline` are mutually exclusive — passing both raises `InvalidParameter`.
+
+For a fully customised retry strategy:
+
+```python
+from meawfy import MeawfyClient, RetryPolicy
+
+policy = RetryPolicy(
+    max_attempts=5,        # first try plus four retries
+    base_delay=1.0,        # seconds for the first backoff
+    max_delay=16.0,        # ceiling on the exponential backoff
+    max_retry_after=120.0, # give up if Retry-After exceeds this
+    jitter=0.25,           # up to 25% random jitter on the wait
+    deadline=60.0,         # one logical call must finish in 60s, waits included
+)
+
+client = MeawfyClient(retry=policy)
+```
+
+## Python version matrix
+
+| Python version | Supported |
+|---|---|
+| 3.9 | ✅ Minimum supported version |
+| 3.10 | ✅ |
+| 3.11 | ✅ |
+| 3.12 | ✅ |
+| 3.8 and below | ❌ Type union syntax (`X \| Y`) requires 3.10+ at runtime in some paths |
+| PyPy 3.9+ | ✅ Should work; `urllib` and the stdlib are available |
+
+<Tip>
+The `from __future__ import annotations` at the top of each module defers annotation evaluation, so the `X | Y` union syntax in type hints does not require Python 3.10 at runtime. Python 3.9 is the hard minimum.
+</Tip>
+
+## Recording and replaying responses
+
+The endpoint is internal and unversioned. The handbook's recommended defence against silent parameter renames is to record a real response and pin the date you tested it. Use `save_envelope()` from Python or the `record` command from the CLI:
+
+```bash
+# Record a response to a file
+python3 -m meawfy record fixtures/periodic-table.json "periodic table" --per-page 50
+
+# Replay it in subsequent searches — no network
+python3 -m meawfy search "periodic table" --fixture fixtures/periodic-table.json
+
+# Replay it in a verify call to test the echo logic against a stable fixture
+python3 -m meawfy verify min_mirrors 2 "worksheet" --fixture fixtures/periodic-table.json
+```
+
+From Python:
+
+```python
+from meawfy import MeawfyClient, replay_transport
+
+# Save
+client = MeawfyClient()
+client.save_envelope("fixtures/periodic-table.json", "periodic table", per_page=50)
+
+# Replay
+replay_client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
+envelope = replay_client.search("periodic table")
+```

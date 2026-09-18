@@ -1,0 +1,440 @@
+---
+title: "Reports — Echo, Collection, Verification, and Diff"
+sidebarTitle: "Reports"
+description: "Four structured report types from multi-call helpers: EchoReport, Collection from collect(), VerificationReport from verify(), and DiffReport from diff()."
+---
+
+The client returns four structured report objects from its multi-call helpers. Three of them (`Collection`, `VerificationReport`, `DiffReport`) are frozen dataclasses returned by methods on `MeawfyClient`. The fourth (`EchoReport`) is also produced by `Envelope.echo_report()` for single-request echo comparisons. All four are importable from `meawfy`.
+
+## EchoReport
+
+`EchoReport` answers the question: *did the endpoint act on what I sent?* Because the endpoint answers `200` to everything — ignoring unknown parameter names, silently falling through on bad enum values — the echo object inside every response is the only evidence that a parameter did anything. `EchoReport` compares what you sent against what the endpoint echoed back.
+
+```python
+from meawfy.models import EchoReport
+```
+
+### Fields
+
+<ResponseField name="honoured" type="Mapping[str, str]">
+  Parameters that appeared in the echo with the same canonical value as sent. Canonical comparison is case-insensitive and order-independent for comma lists: `"mega,dropbox"` and `"dropbox,mega"` are treated as equal.
+</ResponseField>
+
+<ResponseField name="changed" type="Mapping[str, tuple[str, str]]">
+  Parameters that appeared in the echo but with a different value. Each entry maps `name → (sent_value, echoed_value)`. A changed value means the endpoint rewrote your input — the index understood something, but not what you intended.
+</ResponseField>
+
+<ResponseField name="absent" type="tuple[str, ...]">
+  Parameter names that were sent but do not appear in the echo at all. An absent parameter did nothing: the endpoint treated it as if it were not there. This is the key signal for a renamed or unimplemented filter.
+</ResponseField>
+
+### Properties
+
+```python
+report.ok     # bool — True only when changed and absent are both empty
+report.total  # int  — len(honoured) + len(changed) + len(absent)
+```
+
+### `summary()` Method
+
+Returns a single human-readable line describing the comparison result:
+
+```python
+report.summary()
+
+# When everything is honoured:
+# "echo confirms all 4 parameter(s)"
+
+# When some are absent or changed:
+# "echo confirms 2/4 · changed: sort 'indexed'->'relevance' · absent from echo: min_mirrors"
+
+# When nothing was sent:
+# "no parameters sent"
+```
+
+### `EchoReport.from_pairs(sent, echo)` Class Method
+
+```python
+EchoReport.from_pairs(sent: Mapping[str, str], echo: Mapping[str, Any]) -> EchoReport
+```
+
+Constructs an `EchoReport` by diffing `sent` (a dict of wire-name → sent-value string pairs) against `echo` (the `query` object from an `Envelope`). This is the underlying method used by both `Envelope.echo_report()` and `MeawfyClient.verify()`.
+
+```python
+from meawfy.models import EchoReport
+
+sent = {"search_query": "atlas", "min_mirrors": "2", "sort": "indexed"}
+echo = {"search_query": "atlas", "sort": "relevance"}  # min_mirrors absent, sort changed
+
+report = EchoReport.from_pairs(sent, echo)
+print(report.honoured)  # {'search_query': 'atlas'}
+print(report.changed)   # {'sort': ('indexed', 'relevance')}
+print(report.absent)    # ('min_mirrors',)
+print(report.ok)        # False
+print(report.summary())
+# echo confirms 1/3 · changed: sort 'indexed'->'relevance' · absent from echo: min_mirrors
+```
+
+### Interpreting Results
+
+<CardGroup cols={2}>
+  <Card title="absent → did nothing" icon="circle-xmark">
+    A parameter in `absent` was not echoed at all. The endpoint silently ignored it. This typically means the parameter name has moved, the value was invalid, or the feature is not yet implemented. Sending it produced the same result as not sending it.
+  </Card>
+  <Card title="changed → rewrote it" icon="arrows-rotate">
+    A parameter in `changed` was echoed with a different value. The endpoint accepted the name but normalised or constrained the value — for example, capping `per_page` at 100, or substituting the default sort when an unknown key was sent.
+  </Card>
+</CardGroup>
+
+```python
+# Typical usage after a search
+query = Query("worksheet", min_mirrors=2, sort="indexed", per_page=50)
+envelope = client.search(query)
+report = envelope.echo_report(query)
+
+if not report.ok:
+    for name in report.absent:
+        print(f"  {name}: ignored — may have moved or not yet implemented")
+    for name, (sent, echoed) in report.changed.items():
+        print(f"  {name}: sent {sent!r}, endpoint used {echoed!r}")
+```
+
+---
+
+## Collection
+
+`Collection` is returned by `MeawfyClient.collect()`, which walks multiple pages and accumulates all rows up to the reachable 10,000-row window. It is a frozen dataclass.
+
+```python
+from meawfy.reports import Collection
+
+collection = client.collect(
+    "climate report",
+    providers=["mega"],
+    sort="indexed",
+    order="desc",
+    per_page=100,
+)
+```
+
+### Fields
+
+<ResponseField name="rows" type="tuple[Result, ...]">
+  All rows fetched across every page walked, in the order returned by the endpoint.
+</ResponseField>
+
+<ResponseField name="pages_fetched" type="int">
+  The number of pages requested. Each page is one request against the rate-limit budget.
+</ResponseField>
+
+<ResponseField name="total" type="int">
+  The `total` from the first envelope — the index's own count of matching rows. This may be larger than `len(rows)` when `truncated` is `True`.
+</ResponseField>
+
+<ResponseField name="truncated" type="bool">
+  `True` when `total` exceeds the reachable page window (`page × per_page ≤ 10,000`). The endpoint keeps answering with the cap applied rather than refusing, so rows beyond the window are simply unreachable without narrowing the query.
+</ResponseField>
+
+<ResponseField name="took_ms" type="int">
+  Sum of `took_ms` across every page fetched. Wall time includes rate-limit pacing and network round-trips; this is server time only.
+</ResponseField>
+
+<ResponseField name="advice" type="tuple[str, ...]">
+  Human-readable strings appended when `truncated` is `True`. The message reads:
+
+  > `"{total} rows exceed the 10000-row window at per_page={size}; a narrowed set is always the better answer than a deeper page"`
+</ResponseField>
+
+`Collection` supports `len()` and direct iteration over its rows:
+
+```python
+print(len(collection))   # number of rows fetched
+for row in collection:
+    print(row.name)
+```
+
+### The `truncated` Flag
+
+The endpoint's paging cap is `page × per_page ≤ 10,000`. At the default `per_page=100`, that is 100 pages of 100 rows. When a query matches more than 10,000 rows, `collect()` stops at the window boundary and sets `truncated = True`.
+
+```python
+collection = client.collect("atlas", per_page=100)
+
+if collection.truncated:
+    print(f"fetched {len(collection.rows)} of {collection.total} rows")
+    for note in collection.advice:
+        print(note)
+    # "12483 rows exceed the 10000-row window at per_page=100;
+    #  a narrowed set is always the better answer than a deeper page"
+```
+
+<Warning>
+There is no way to page past 10,000 rows. The endpoint enforces the cap silently — it keeps returning rows with the cap applied rather than returning an error. Adding `ext=`, `max_size=`, `after=`, or a more specific `search_query` is always the right answer.
+</Warning>
+
+---
+
+## VerificationReport
+
+`VerificationReport` is returned by `MeawfyClient.verify()`, which sends the request *twice* — once with a parameter and once without — and diffs the echo. This is the handbook's own test for a parameter whose name may have moved or whose implementation was dropped.
+
+```python
+from meawfy.reports import VerificationReport
+
+report = client.verify("min_mirrors", 2, "worksheet")
+```
+
+<Note>
+`verify()` costs **two requests** against the 120-per-minute budget. Use it for maintenance probes and health checks, not on every search.
+</Note>
+
+### Fields
+
+<ResponseField name="name" type="str">
+  The parameter name that was probed.
+</ResponseField>
+
+<ResponseField name="sent" type="str">
+  The wire-form value that was sent (after normalisation).
+</ResponseField>
+
+<ResponseField name="echoed" type="Any">
+  The value the endpoint returned in its echo for this parameter, or `None` if it was absent.
+</ResponseField>
+
+<ResponseField name="verdict" type="str">
+  One of `"honoured"`, `"rewritten"`, or `"ignored"`. See verdicts below.
+</ResponseField>
+
+<ResponseField name="total_without" type="int">
+  The `total` from the call made *without* the parameter. The baseline.
+</ResponseField>
+
+<ResponseField name="total_with" type="int">
+  The `total` from the call made *with* the parameter.
+</ResponseField>
+
+<ResponseField name="warnings" type="tuple[str, ...]">
+  Any warnings from the candidate call (the one with the parameter).
+</ResponseField>
+
+<ResponseField name="remaining" type="int | None">
+  `X-RateLimit-Remaining` from the candidate call.
+</ResponseField>
+
+### Verdicts
+
+<Tabs>
+  <Tab title="honoured">
+    The parameter appeared in the echo with the canonical value you sent. The endpoint acknowledged and applied it.
+
+    ```
+    min_size=10485760: honoured, the echo reports '10485760';
+    total 4821 -> 1204
+    ```
+  </Tab>
+  <Tab title="rewritten">
+    The parameter appeared in the echo but with a different value. The endpoint accepted the name but normalised or constrained your value.
+
+    ```
+    sort=has_preview: rewritten, the echo reports 'relevance' instead;
+    total 4821 -> 4821
+    ```
+  </Tab>
+  <Tab title="ignored">
+    The parameter did not appear in the echo at all. It changed nothing — the total stayed the same and the filter was not applied.
+
+    ```
+    min_mirrors=2: ignored, absent from the echo, so it changed nothing
+    (total stayed 4821). A value equal to the documented default may be
+    omitted legitimately; anything else means the name moved.
+    ```
+  </Tab>
+</Tabs>
+
+### `explain()` Method and `.honoured` Property
+
+```python
+report.honoured        # bool — True only when verdict == "honoured"
+report.changed_total   # bool — True when total_with != total_without
+report.explain()       # str — the full human-readable sentence
+print(report)          # same as report.explain()
+```
+
+### CLI and Exit Code
+
+The `meawfy verify` CLI command wraps this method and exits with code `5` when the verdict is not `"honoured"`:
+
+```bash
+python3 -m meawfy verify min_mirrors 2 "worksheet"
+# Exit code 5 if verdict != honoured
+```
+
+This makes it scriptable — you can gate a pipeline on whether a parameter is still being honoured:
+
+```python
+report = client.verify("min_mirrors", 2, "worksheet")
+if not report.honoured:
+    print(report.explain())
+    raise SystemExit(5)
+```
+
+---
+
+## DiffReport
+
+`DiffReport` is returned by `MeawfyClient.diff()` (Recipe R12). It compares two drives on a content key — by default `hash` — and reports what is shared, what is unique to each side, and the names that appear on both sides while the content key differs.
+
+```python
+from meawfy.reports import DiffReport
+
+report = client.diff(
+    "trading post",
+    left="mega",
+    right="gdrive",
+    key="hash",
+)
+```
+
+<Note>
+`diff()` costs **two requests** — one per drive — against the rate-limit budget.
+</Note>
+
+### Fields
+
+<ResponseField name="left" type="str">
+  The name of the left drive (default: `"mega"`).
+</ResponseField>
+
+<ResponseField name="right" type="str">
+  The name of the right drive (default: `"gdrive"`).
+</ResponseField>
+
+<ResponseField name="key" type="str">
+  The row field used for comparison (default: `"hash"`). Must be one of the 17 row fields.
+</ResponseField>
+
+<ResponseField name="left_total" type="int">
+  Total matching rows reported by the left drive.
+</ResponseField>
+
+<ResponseField name="right_total" type="int">
+  Total matching rows reported by the right drive.
+</ResponseField>
+
+<ResponseField name="shared_keys" type="tuple[str, ...]">
+  Keys (hashes or other field values) that appear in *both* drives' first page. These rows exist on both sides with the same content identity.
+</ResponseField>
+
+<ResponseField name="left_only_keys" type="tuple[str, ...]">
+  Keys present in the left drive but not in the right drive.
+</ResponseField>
+
+<ResponseField name="right_only_keys" type="tuple[str, ...]">
+  Keys present in the right drive but not in the left drive.
+</ResponseField>
+
+<ResponseField name="same_name_different_key" type="tuple[str, ...]">
+  File names that appear on both sides but whose `key` values do not intersect. These are the cases where one drive has the actual content and another has a copy of the title only — a re-upload with different bytes, or a file that was modified before being re-shared.
+</ResponseField>
+
+<ResponseField name="partial" type="bool">
+  `True` when either drive reported more rows than the `per_page` used for the diff. Only the first page of each drive was compared.
+</ResponseField>
+
+### `overlap` Property
+
+```python
+report.overlap  # int — len(shared_keys)
+```
+
+The count of content keys shared between both drives. A diff script can use this as a truthy gate:
+
+```python
+# From examples/diff_drives.py
+return 0 if report.overlap else 1
+```
+
+### `explain()` Method
+
+Returns a single multi-part string describing the comparison:
+
+```python
+print(report.explain())
+# mega vs gdrive on hash: 14 shared, 83 only in mega, 6 only in gdrive
+# · 2 name(s) appear on both sides with a different hash:
+#   the drive that has the content versus the drive that has a copy of its title
+# · partial: only the first page of each drive was compared
+#   (totals 97 and 20); narrow the query to compare the rest
+print(report)  # same as report.explain()
+```
+
+### `partial` Flag
+
+`partial` is `True` when `left_total > per_page` or `right_total > per_page`. Because the diff only compares first-page rows, any result from a partial diff is incomplete.
+
+```python
+if report.partial:
+    print(
+        f"note: {report.left} reports {report.left_total} rows, "
+        f"{report.right} reports {report.right_total}; "
+        "only the first page of each was compared"
+    )
+```
+
+The right response is a narrower query — add `ext=`, `max_size=`, or a more specific phrase — not a deeper page.
+
+### `same_name_different_key`
+
+This field names the files where one drive has the content and another has only the title. It is the clearest signal that a file was re-uploaded or duplicated with different bytes rather than merely mirrored:
+
+```python
+for name in report.same_name_different_key:
+    print(f"  {name}: appears on both sides but with a different {report.key}")
+    print("  → one drive has the content; the other has a copy of the title only")
+```
+
+### Complete Diff Example
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+report = client.diff(
+    "atlas of human anatomy",
+    left="mega",
+    right="dropbox",
+    key="hash",
+    max_size="400mb",
+)
+
+print(report.explain())
+
+print(f"\nshared ({len(report.shared_keys)}):")
+for key in report.shared_keys[:5]:
+    print(f"  {key}")
+
+print(f"\nonly in {report.left} ({len(report.left_only_keys)}):")
+for key in report.left_only_keys[:5]:
+    print(f"  {key}")
+
+print(f"\nonly in {report.right} ({len(report.right_only_keys)}):")
+for key in report.right_only_keys[:5]:
+    print(f"  {key}")
+
+if report.same_name_different_key:
+    print(f"\nsame name, different {report.key}:")
+    for name in report.same_name_different_key:
+        print(f"  {name}")
+```
+
+---
+
+## Summary: Which Report for Which Task
+
+| Task | Method | Cost | Report type |
+|---|---|---|---|
+| Check echo after one search | `envelope.echo_report(query)` | 0 extra requests | `EchoReport` |
+| Walk all pages of a query | `client.collect(...)` | N requests | `Collection` |
+| Probe whether one parameter acts | `client.verify(name, value, query)` | 2 requests | `VerificationReport` |
+| Compare two drives on content | `client.diff(query, left=, right=)` | 2 requests | `DiffReport` |

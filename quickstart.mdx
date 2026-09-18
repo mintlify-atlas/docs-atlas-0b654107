@@ -1,47 +1,355 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Quickstart: Run Your First Meawfy File Search in Python"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, build a Query, call client.search(), read the echo report, check for dropped parameters, and handle warnings — no install needed."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+Meawfy Client has no install step and no external dependencies. You clone the repository, point Python at it, and make your first request. This guide walks through each step and explains what to look at first in the response — because the endpoint answers `200` to everything, reading the echo before the rows is not optional.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Check your Python version">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+The package requires Python 3.9 or newer, and uses only the standard library.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+```bash
+python3 --version
+# Python 3.9.x or higher
+```
+
+No virtual environment is required. No `pip install`. No `requirements.txt`. The only dependency is `urllib`, which ships with Python.
+
+</Step>
+
+<Step title="Clone and verify the CLI">
+
+```bash
+git clone https://github.com/novodevo/meawfy-client.git
+cd meawfy-client
+python3 -m meawfy --help
+```
+
+You should see the full command listing. If you are working from a parent directory (such as `query-handbook/`), use `PYTHONPATH` instead:
+
+```bash
+PYTHONPATH=/path/to/meawfy-client python3 -m meawfy --help
+```
+
+To confirm the parameter registry is intact, list the seven load-bearing parameters:
+
+```bash
+python3 -m meawfy params --status contract
+```
+
+This runs no network requests. A successful listing confirms the package is importable and the registry passes its internal assertions.
+
+</Step>
+
+<Step title="Preview the URL before sending it">
+
+The `url` command builds and prints the request URL without making any network call. Use it to verify your parameter set before spending a request against the rate-limit budget.
+
+```bash
+python3 -m meawfy url "periodic table" -p mega -p dropbox --min-size 1mb --sort size -o desc
+```
+
+The same thing from Python:
+
+```python
+from meawfy import MeawfyClient, Query
+
+query = Query(
+    "periodic table",
+    providers=["mega", "dropbox"],
+    min_size="1mb",
+    sort="size",
+    order="desc",
+    per_page=25,
+    fields="id,name,provider,size,ext,files,url",
+)
+
+client = MeawfyClient()
+print(client.url_for(query))
+```
+
+`url_for` makes no network call. `Query` validates every parameter before the URL is built: an unknown name raises `UnknownParameter` and a miscapitalised enum raises `InvalidParameter`, both before any request is sent.
+
+</Step>
+
+<Step title="Run your first search">
+
+The `search()` method sends one request and returns an `Envelope`. Read the echo first, then the warnings, then the rows — this is the order the handbook specifies, and it is the right order because the endpoint never tells you in the status line if something went wrong.
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+
+query = Query(
+    "periodic table",
+    providers=["mega", "dropbox", "gdrive"],
+    max_size="500mb",
+    sort="size",
+    order="desc",
+    per_page=25,
+    fields="id,name,provider,size,ext,files,url",
+    facets="providers,ext",
+)
+
+# Print any advice the Query object emitted (e.g. sort=size on folders)
+for note in query.advice:
+    print(f"advice: {note}")
+
+envelope = client.search(query)
+
+print(f"total: {envelope.total}  page: {envelope.page}/{envelope.pages}  took: {envelope.took_ms}ms")
+```
+
+<Note>
+The `fields` parameter is a projection. Sending `fields=id,name,provider,size,ext,files,url` is what a real client renders — it is about a tenth of the bytes of the full 17-field row. Omit it only when you specifically need the other fields.
+</Note>
+
+</Step>
+
+<Step title="Read the echo report">
+
+The `query` object in the response echoes what the endpoint *understood*, not what you sent. A parameter missing from that echo did nothing, and on an endpoint that answers `200` to everything, the echo is the whole debugging story.
+
+```python
+# Compare what was sent against what the endpoint echoed back
+echo = envelope.echo_report(query)
+print(echo.summary())
+
+# Branch on the result
+if not echo.ok:
+    dropped = list(echo.absent) + list(echo.changed.keys())
+    print(f"parameters not honoured: {', '.join(dropped)}")
+```
+
+`EchoReport` has three buckets:
+
+| Attribute | Meaning |
+|---|---|
+| `echo.honoured` | Sent and echoed back unchanged — the endpoint acted on these |
+| `echo.changed` | Echoed, but the endpoint substituted a different value |
+| `echo.absent` | Not in the echo at all — these parameters did nothing |
+
+</Step>
+
+<Step title="Check warnings and handle errors">
+
+Warnings are soft signals the endpoint surfaces in the response body. Always check them before processing rows.
+
+```python
+for warning in envelope.warnings:
+    print(f"warning: {warning}")
+```
+
+The client raises typed exceptions for hard failures. All of them inherit from `MeawfyError`:
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy import (
+    UnknownParameter,   # unknown parameter name — raised before the request is sent
+    InvalidParameter,   # bad value or cap exceeded — raised before the request is sent
+    ResponseError,      # body-level error object under HTTP 200
+    RateLimited,        # 429, Retry-After exhausted
+    DeepPagingError,    # page × per_page > 10,000
+    TransportError,     # DNS, TLS, timeout
+)
+
+client = MeawfyClient()
+
+try:
+    envelope = client.search("worksheet", max_size="400mb", per_page=50)
+except UnknownParameter as exc:
+    print(f"bad parameter name: {exc}")
+except InvalidParameter as exc:
+    print(f"bad value for {exc.name}: {exc.reason}")
+except ResponseError as exc:
+    print(f"endpoint error {exc.code}: {exc.message}")
+except RateLimited as exc:
+    print(f"rate limited; retry after {exc.retry_after}s")
+except TransportError as exc:
+    print(f"transport failure: {exc}")
+```
+
+The client handles retries internally. A `429` waits out `Retry-After`. A `5xx` or dropped connection backs off exponentially with jitter. A `RateLimited` exception only surfaces once `max_retries` (default 3) is exhausted.
+
+</Step>
+
+<Step title="Use facets to confirm your filters acted">
+
+Facets are computed after the filters and before the page window, so they describe the whole restricted set. This means requesting one row with `per_page=1` still gives you counts across all matching rows. More importantly, facets tell you whether a filter actually did anything.
+
+```python
+client = MeawfyClient()
+
+envelope = client.search(
+    "periodic table",
+    providers="dropbox",
+    facets="providers,ext",
+    per_page=1,
+)
+
+# provider_counts() always includes all three documented drives, even at zero.
+# If mega or gdrive show non-zero counts after providers=dropbox, the filter
+# was not honoured.
+print(envelope.provider_counts())
+# {'mega': 0, 'dropbox': 812, 'gdrive': 0}
+
+print(envelope.facet("ext"))
+# {'pdf': 640, 'zip': 233, 'epub': 87}
+```
+
+<Warning>
+If `facets.providers` lists results for drives you did not request, the `providers` parameter was not honoured. Without facets, a zero `total` is indistinguishable from a drive that was never indexed.
+</Warning>
+
+</Step>
+
+<Step title="Run the quickstart example">
+
+The repository includes a complete working example that demonstrates all of the above in a single script. Run it with any search term:
+
+```bash
+python3 examples/quickstart.py "periodic table"
+python3 examples/quickstart.py "worksheet" --max-size 400mb --per-page 50
+```
+
+The example source:
+
+```python
+"""The smallest useful program: one query, the echo, the rows.
+
+    python3 examples/quickstart.py "periodic table"
+    python3 examples/quickstart.py "worksheet" --max-size 400mb --per-page 50
+
+The four jobs of the parameter set in one call: the question, the drive and the
+material, the order, the shape. Everything else about the endpoint is discipline:
+read the echo first, then the warnings, then the rows.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from meawfy import CAPS, MeawfyClient, Query
+from meawfy.render import facets_text, rows_table, summary_line
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("term", nargs="+", help="what you are looking for")
+    parser.add_argument(
+        "-p",
+        "--provider",
+        action="append",
+        dest="providers",
+        help="mega, dropbox or gdrive; repeatable, default all three",
+    )
+    parser.add_argument("-e", "--ext", help="comma list, lowercase, no dot: pdf,epub")
+    parser.add_argument(
+        "--max-size", default="500mb", help="a size ceiling keeps the noise out"
+    )
+    parser.add_argument(
+        "-s",
+        "--sort",
+        default="size",
+        help="relevance, size, files, name, indexed, ...",
+    )
+    parser.add_argument("-o", "--order", default="desc")
+    parser.add_argument(
+        "--per-page", default="25", help=f"default 24, capped at {CAPS['per_page_max']}"
+    )
+    parser.add_argument("--page", default="1")
+    parser.add_argument(
+        "--columns", help="table columns; default is the row's own fields"
+    )
+    args = parser.parse_args()
+
+    query = Query(
+        " ".join(args.term),
+        providers=args.providers or list(("mega", "dropbox", "gdrive")),
+        ext=args.ext,
+        max_size=args.max_size,
+        sort=args.sort,
+        order=args.order,
+        per_page=args.per_page,
+        page=args.page,
+        # A projection is the difference between a page that loads and a page that
+        # waits: these seven fields are what a client actually renders.
+        fields="id,name,provider,size,ext,files,url",
+        # Facets are computed before the page window, so they describe the whole
+        # restricted set, and they are the only evidence that a filter acted.
+        facets="providers,ext",
+    )
+    for note in query.advice:
+        print(f"advice: {note}", file=sys.stderr)
+
+    client = MeawfyClient()
+    envelope = client.search(query)
+    print(summary_line(envelope))
+
+    # `query` echoes what the endpoint understood, never what you sent.
+    echo = envelope.echo_report(query)
+    print(f"echo: {echo.summary()}")
+    if not echo.ok:
+        dropped = ", ".join(echo.absent + tuple(echo.changed))
+        print(f"not honoured: {dropped}", file=sys.stderr)
+    for warning in envelope.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    if envelope.results:
+        print(rows_table(envelope.results, args.columns))
+    if envelope.facets:
+        print(facets_text(envelope))
+    return 0 if envelope.has_rows else 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+</Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What to do when you get zero results
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+Zero rows is not an error — `total: 0` and an empty `results` list are a valid response. Use facets to distinguish between "no files match" and "the filter was not applied":
+
+```python
+envelope = client.search("my query", providers="gdrive", facets="providers", per_page=1)
+
+counts = envelope.provider_counts()
+if counts["gdrive"] == 0 and counts["mega"] > 0:
+    # gdrive=0 but mega has rows: either the filter was not honoured, or
+    # there really are no matching files on gdrive. Check the echo.
+    echo = envelope.echo_report(query)
+    if "providers" in echo.absent:
+        print("providers filter was not echoed — it did nothing")
+```
+
+## Recording a response for offline testing
+
+The endpoint is internal and unversioned. The handbook's only defence against an unannounced rename is to pin the date you last tested it. Save a real response with `save_envelope()` and replay it later with `MEAWFY_FIXTURE`:
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# Save a real response to disk
+client.save_envelope("fixtures/periodic-table.json", "periodic table", per_page=50)
+```
+
+```bash
+# Replay the fixture in the CLI — no network
+python3 -m meawfy search "periodic table" --fixture fixtures/periodic-table.json
+```
+
+<Tip>
+Use fixture files as regression baselines. A recorded envelope echoes the recorded `query` object unchanged, so `echo_report` will report every parameter as honoured regardless of what you send against the fixture. The frozen body is the point — it is a regression baseline, not a live check.
 </Tip>

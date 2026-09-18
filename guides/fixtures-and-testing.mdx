@@ -1,0 +1,245 @@
+---
+title: "Fixtures and Testing Against an Unversioned Endpoint"
+sidebarTitle: "Fixtures & Testing"
+description: "Record a real response with save_envelope(), replay it with replay_transport() or MEAWFY_FIXTURE, and use it as a regression baseline against a live check."
+---
+
+The endpoint at `https://meawfy.com/internal/api/results.json` is internal, unversioned, and silent about changes. A parameter can be renamed, a filter can stop acting, and a sort key can fall through to its default — all under the same HTTP 200. The only defence the handbook offers is to pin the date you last tested it: record a real response, check it against a live one when something looks wrong, and use the recorded body in tests so they do not call the network.
+
+## Why fixtures matter
+
+Because the endpoint has no version in the path and no changelog, any parameter you depend on may move without notice. The seven load-bearing names (`search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`) are the most stable, but everything marked `planned` or `reserved` can change. A fixture lets you:
+
+1. **Pin the date** you last confirmed the endpoint behaved as expected.
+2. **Run tests offline** without touching the rate-limit budget.
+3. **Detect regressions** by comparing a freshly recorded body against a saved baseline.
+
+## `client.save_envelope()` — record a real response
+
+`save_envelope(path, query, **params)` runs one search and writes the full JSON body to a file. The file is what `replay_transport` and `MEAWFY_FIXTURE` serve back.
+
+```python
+def save_envelope(
+    path: str | Path,
+    query=None,
+    **params,
+) -> Envelope: ...
+```
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# Record a response for "periodic table" and save it
+envelope = client.save_envelope(
+    "fixtures/periodic-table.json",
+    "periodic table",
+    providers=["mega", "dropbox"],
+    per_page=50,
+    sort="size",
+    order="desc",
+)
+print(f"saved {len(envelope.results)} of {envelope.total} rows")
+# saved 50 of 1283 rows
+```
+
+The file is valid JSON, indented, UTF-8. Parent directories are created automatically. The file contains the complete envelope payload — `query`, `facets`, `warnings`, `total`, `pages`, `took_ms`, and `results`.
+
+## `replay_transport()` — play back a recorded envelope
+
+`replay_transport(source)` returns a transport callable that answers **every** request with the same frozen envelope. It accepts a file path, a path string, or an already-loaded dict.
+
+```python
+from meawfy import MeawfyClient
+from meawfy.client import replay_transport
+
+client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
+
+# Every search() call returns the recorded body, regardless of parameters
+envelope = client.search("periodic table", per_page=50)
+print(envelope.total)   # the value from the file
+```
+
+<Note>
+A replayed transport sets `X-RateLimit-Remaining: 120` on every response so the rate limiter does not block tests. No real network calls are made.
+</Note>
+
+### Passing a pre-loaded dict
+
+When you already have the body in memory — from a test fixture or a parametrised test — pass a dict directly:
+
+```python
+import json
+from meawfy import MeawfyClient
+from meawfy.client import replay_transport
+
+with open("fixtures/periodic-table.json") as f:
+    payload = json.load(f)
+
+client = MeawfyClient(transport=replay_transport(payload))
+envelope = client.search("anything")
+assert envelope.total == payload["total"]
+```
+
+## `MEAWFY_FIXTURE` — environment variable
+
+Set `MEAWFY_FIXTURE` to a file path and `MeawfyClient()` will use it automatically — without any code change.
+
+```bash
+# Record
+python3 -m meawfy record fixtures/periodic-table.json "periodic table" --per-page 50
+
+# Replay via environment variable
+MEAWFY_FIXTURE=fixtures/periodic-table.json python3 -m meawfy search "periodic table"
+
+# A test script that reads the variable
+MEAWFY_FIXTURE=fixtures/periodic-table.json python3 my_script.py
+```
+
+```python
+import os
+from meawfy import MeawfyClient
+
+# If MEAWFY_FIXTURE is set, the client uses it automatically
+os.environ["MEAWFY_FIXTURE"] = "fixtures/periodic-table.json"
+client = MeawfyClient()   # no transport argument needed
+envelope = client.search("periodic table")
+```
+
+The variable is read by `MeawfyClient.__init__` when no `transport` argument is given. Passing an explicit `transport` always takes precedence.
+
+## `--fixture FILE` — CLI flag
+
+Every CLI command accepts `--fixture FILE`. It has the same effect as `MEAWFY_FIXTURE`: the recorded body is served for every request the command makes.
+
+```bash
+# Search with a fixture
+python3 -m meawfy search "periodic table" --fixture fixtures/periodic-table.json
+
+# Verify with a fixture (both calls use the same file)
+python3 -m meawfy verify min_files 10 "course pack" --fixture fixtures/periodic-table.json
+
+# Diff with a fixture
+python3 -m meawfy diff "trading post" --fixture fixtures/trading-post.json
+```
+
+<Warning>
+When `verify` or `diff` runs with a fixture, both of its two calls receive the **same** frozen body. The verdicts and overlap numbers will reflect the fixture's content, not a real comparison. Use fixtures for offline testing, not for production verification.
+</Warning>
+
+## The `record` command
+
+The `record` command is the CLI equivalent of `save_envelope()`. It runs a query and writes the body to a file.
+
+```bash
+# Record "periodic table" with 50 rows per page
+python3 -m meawfy record fixtures/periodic-table.json "periodic table" --per-page 50
+
+# Output:
+# saved 50 of 1283 rows to fixtures/periodic-table.json
+# replay it with: meawfy search ... --fixture fixtures/periodic-table.json
+
+# Record with filters
+python3 -m meawfy record fixtures/r7.json "course pack" \
+    --provider dropbox --kind folder --min-files 50 --sort files
+```
+
+## What a replayed envelope does to `echo_report()`
+
+A fixture freezes the `query` object as it was at recording time. When you call `envelope.echo_report(sent_query)`, the comparison is against that frozen echo — not against what the endpoint would say today.
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy.client import replay_transport
+
+client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
+
+query = Query("periodic table", providers=["mega", "dropbox"], sort="size", order="desc")
+envelope = client.search(query)
+
+report = envelope.echo_report(query)
+print(report.ok)       # True — the frozen echo matches what was sent at record time
+print(report.summary()) # echo confirms all 4 parameter(s)
+```
+
+A replayed envelope will always report every parameter as **honoured** as long as the query matches what was recorded. The body is frozen, which is the point of a fixture — it is a regression baseline, not a live check.
+
+<Info>
+If you want to test that a parameter is still honoured by the live endpoint, use `client.verify()` with a real transport. If you want to test that your code handles an `ignored` verdict correctly, construct a fixture body where the `query` object omits the parameter.
+</Info>
+
+## Fixture as a regression baseline
+
+The workflow the handbook recommends is:
+
+<Steps>
+  <Step title="Record">
+    Run `record` when the endpoint is working as expected. The file captures the exact echo, row count, and first-page results.
+
+    ```bash
+    python3 -m meawfy record fixtures/worksheet.json "worksheet" \
+        --min-mirrors 2 --sort indexed --order desc --per-page 50
+    ```
+  </Step>
+  <Step title="Pin the date">
+    Commit the fixture file. The filename or a comment records when you last confirmed the endpoint's behaviour.
+  </Step>
+  <Step title="Test offline">
+    Run your tests with `MEAWFY_FIXTURE` pointing at the file. No network calls, no rate-limit cost.
+
+    ```bash
+    MEAWFY_FIXTURE=fixtures/worksheet.json python3 -m pytest tests/
+    ```
+  </Step>
+  <Step title="Compare against live when needed">
+    When you suspect a parameter has moved, record a fresh copy and diff the two JSON files. The `query` object in the new file is what the endpoint understands today.
+
+    ```bash
+    python3 -m meawfy record fixtures/worksheet-new.json "worksheet" \
+        --min-mirrors 2 --sort indexed --order desc --per-page 50
+
+    diff fixtures/worksheet.json fixtures/worksheet-new.json
+    ```
+  </Step>
+</Steps>
+
+## Full example
+
+```python
+"""
+Offline test using a recorded fixture.
+"""
+
+from meawfy import MeawfyClient, Query
+from meawfy.client import replay_transport
+
+FIXTURE = "fixtures/periodic-table.json"
+
+
+def test_search_returns_rows():
+    client = MeawfyClient(transport=replay_transport(FIXTURE))
+    envelope = client.search("periodic table", providers="mega")
+    assert envelope.ok
+    assert envelope.total > 0
+    assert len(envelope.results) > 0
+
+
+def test_echo_report_is_clean():
+    client = MeawfyClient(transport=replay_transport(FIXTURE))
+    query = Query("periodic table", providers=["mega", "dropbox"], sort="size")
+    envelope = client.search(query)
+    report = envelope.echo_report(query)
+    # The fixture was recorded with this exact query, so the echo matches
+    assert report.ok, report.summary()
+
+
+def test_collect_does_not_call_network():
+    # collect() uses iterate() which uses _paginate() —
+    # all calls receive the same frozen body
+    client = MeawfyClient(transport=replay_transport(FIXTURE))
+    collection = client.collect("periodic table", max_rows=50)
+    assert len(collection.rows) <= 50
+    # stats.requests counts how many times the transport was called
+    assert client.stats["requests"] >= 1
+```

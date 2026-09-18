@@ -1,20 +1,81 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Meawfy Client: Python SDK for the Meawfy File Index API"
+sidebarTitle: "Home"
+description: "A stdlib-only Python client that validates all 50 query parameters, handles rate limiting, paging, and surfaces the Meawfy endpoint's silent failure modes as typed exceptions."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Meawfy Client is a zero-dependency Python SDK for `GET /internal/api/results.json` — the endpoint that powers meawfy.com's file search across MEGA, Dropbox, and Google Drive. It turns the endpoint's undocumented caps, silent parameter drops, and 200-on-error behaviour into things a program can branch on.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Make your first search call and read the echo in under five minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    No pip required — clone and run. Or install as a package. Both work.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/concepts/endpoint">
+    Understand the endpoint, the five-stage pipeline, and the eight traps.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/client">
+    Full signatures for MeawfyClient, Query, Envelope, Result, and every error class.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Why a dedicated client?
+
+The endpoint answers `200` to malformed requests, silently ignores unknown parameter names, falls through to the default when an enum value is capitalised, and stops paging at 10,000 rows without saying so. A bare `urllib` call or a `curl` command will not catch any of this.
+
+Meawfy Client closes each trap before it becomes a bug in your code:
+
+<CardGroup cols={2}>
+  <Card title="Parameter Validation" icon="shield-check" href="/api/parameters">
+    All 50 parameters are validated before the network call. Unknown names raise `UnknownParameter`; bad values raise `InvalidParameter`.
+  </Card>
+  <Card title="Echo Reports" icon="magnifying-glass" href="/concepts/echo-and-traps">
+    Every response exposes an `EchoReport` that shows which parameters the index actually honoured, changed, or dropped.
+  </Card>
+  <Card title="Safe Paging" icon="arrow-right" href="/guides/paging-and-collecting">
+    `iterate()` and `collect()` stop at the 10,000-row window instead of silently returning misleading results.
+  </Card>
+  <Card title="Rate Limiting" icon="gauge" href="/guides/rate-limiting">
+    Sliding-window pacing at 120 req/min, automatic `Retry-After` handling, and an exposed `remaining` counter.
+  </Card>
+</CardGroup>
+
+## Get started
+
+<Steps>
+  <Step title="Get the code">
+    Clone the repository or add it to your `PYTHONPATH`. Python 3.9+ and no dependencies beyond the standard library.
+
+    ```bash
+    git clone https://github.com/novodevo/meawfy-client.git
+    cd meawfy-client
+    ```
+  </Step>
+  <Step title="Run your first search">
+    ```python
+    from meawfy import MeawfyClient, Query
+
+    client = MeawfyClient()
+    envelope = client.search("periodic table", providers=["mega", "dropbox"], per_page=10)
+    print(envelope.total, "results")
+    for row in envelope.results:
+        print(row.name, row.human_size)
+    ```
+  </Step>
+  <Step title="Check the echo">
+    ```python
+    report = envelope.echo_report(envelope)
+    if not report.ok:
+        print("Parameters not honoured:", report.summary())
+    ```
+  </Step>
+  <Step title="Explore guides and recipes">
+    The [Recipes guide](/guides/recipes) covers eight ready-made query patterns from The Query Handbook. The [CLI reference](/cli/overview) documents every command available from `python -m meawfy`.
+  </Step>
+</Steps>
+
+## Zero dependencies
+
+Meawfy Client uses only the Python standard library: `urllib` for transport, `argparse` for the CLI, and plain strings for output. Python 3.9 or newer is all you need.

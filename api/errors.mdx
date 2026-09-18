@@ -1,0 +1,586 @@
+---
+title: "Exception Hierarchy — Meawfy Client Error Types"
+sidebarTitle: "Errors"
+description: "Every exception the meawfy-client package raises, why it exists, and how to write handlers that match the endpoint's documented failure modes."
+---
+
+The meawfy endpoint answers `200` to almost everything, so most failures are invisible at the HTTP layer: a capitalised enum silently falls through to the default, an unknown parameter disappears without a word, and a body-level error arrives wrapped in a successful response. Every class in this hierarchy stands for one of those failure modes, named in Part VI of *The Query Handbook*, and each is raised at the earliest point the client can catch it — before the network call where possible, and immediately on parsing the body where not.
+
+## Hierarchy at a glance
+
+```
+MeawfyError
+├── InvalidParameter
+│   ├── UnknownParameter
+│   └── DeepPagingError
+├── ResponseError
+└── TransportError
+    └── RateLimited
+```
+
+Catching `MeawfyError` covers everything in the package. Catching `InvalidParameter` covers both `UnknownParameter` and `DeepPagingError`. Catching `TransportError` covers `RateLimited`.
+
+## Exit codes (CLI)
+
+The command-line interface maps these classes to specific exit codes:
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Success |
+| `2` | Any `MeawfyError` — invalid parameter, body-level error, transport failure |
+| `4` | No rows returned (`search --fail-on-empty`, or the `dead` command) |
+| `5` | `verify`: the index did not honour the parameter being tested |
+| `130` | Keyboard interrupt |
+
+---
+
+## Exception reference
+
+<Accordion title="MeawfyError — the root catch-all">
+
+`MeawfyError` is a direct subclass of the built-in `Exception` and is the base class for every error this package raises. Catching it gives you a single handler for the whole package without catching anything from the standard library or third-party code.
+
+```python
+from meawfy import MeawfyClient
+from meawfy.errors import MeawfyError
+
+client = MeawfyClient()
+
+try:
+    envelope = client.search({"search_query": "periodic table"})
+except MeawfyError as exc:
+    # Catches InvalidParameter, UnknownParameter, DeepPagingError,
+    # ResponseError, TransportError, and RateLimited.
+    print(f"meawfy error: {exc}")
+```
+
+The string representation of any `MeawfyError` subclass is always a complete, human-readable sentence. You can print it directly in a log or a CLI error message without inspecting its attributes.
+
+**Source definition:**
+
+```python
+class MeawfyError(Exception):
+    """Base class for every error raised by this package."""
+```
+
+</Accordion>
+
+<Accordion title="InvalidParameter — silent endpoint behaviour caught early">
+
+`InvalidParameter` is raised **before any network call** when a parameter value the endpoint would not honour is detected by the client. This matters because the endpoint's failures are silent: `sort=Size` (capitalised) falls through to relevance without a word, a `search_query` over 200 characters is truncated without a report, and a value outside a parameter's vocabulary returns the default result as if the filter were never there.
+
+**Attributes:**
+
+<ResponseField name="name" type="str" required>
+  The parameter name, e.g. `"sort"` or `"per_page"`.
+</ResponseField>
+
+<ResponseField name="value" type="Any" required>
+  The rejected value, exactly as it was passed in.
+</ResponseField>
+
+<ResponseField name="reason" type="str" required>
+  A human-readable explanation of why the value was rejected, e.g. `"expected one of: relevance, size, files, name, indexed, checked, mirrors, has_preview"`.
+</ResponseField>
+
+The message format is `{name}={value!r} rejected: {reason}`.
+
+**Common triggers:**
+
+- A `sort` value that is not in the documented vocabulary (`relevance`, `size`, `files`, `name`, `indexed`, `checked`, `mirrors`, `has_preview`)
+- An `order` value that is not `asc` or `desc`
+- A `per_page` above the cap of 100
+- A `search_query` longer than 200 characters
+- A `min_size` or `max_size` that cannot be parsed as bytes or a recognised suffix
+
+```python
+from meawfy import Query
+from meawfy.errors import InvalidParameter
+
+try:
+    query = Query("climate report", sort="Size")   # capital S — silently ignored by the endpoint
+except InvalidParameter as exc:
+    print(exc.name)    # "sort"
+    print(exc.value)   # "Size"
+    print(exc.reason)  # "expected one of: relevance, size, ..."
+```
+
+**Source definition:**
+
+```python
+class InvalidParameter(MeawfyError):
+    def __init__(self, name: str, value: Any, reason: str) -> None:
+        self.name = name
+        self.value = value
+        self.reason = reason
+        super().__init__(f"{name}={value!r} rejected: {reason}")
+```
+
+</Accordion>
+
+<Accordion title="UnknownParameter — typos caught before the request">
+
+`UnknownParameter` is a subclass of `InvalidParameter` raised when a parameter name is not one of the 50 documented names. The endpoint ignores unknown names entirely — Handbook trap 1. Because `UnknownParameter` is an `InvalidParameter`, a single `except InvalidParameter` block catches both.
+
+**Attributes:**
+
+<ResponseField name="names" type="tuple[str, ...]" required>
+  All unknown names from the call, as a tuple. The first name is also stored as `name` for compatibility with `InvalidParameter`.
+</ResponseField>
+
+<ResponseField name="known" type="tuple[str, ...]" required>
+  The full tuple of the 50 documented names, populated when the client has them. Used to compute the closest-name hint.
+</ResponseField>
+
+<ResponseField name="name" type="str" required>
+  The first unknown name, inherited from `InvalidParameter`.
+</ResponseField>
+
+<ResponseField name="value" type="None" required>
+  Always `None` for `UnknownParameter` — the issue is the name, not the value.
+</ResponseField>
+
+**The closest-name hint** is computed by a prefix-similarity score and appended to the error message automatically:
+
+```
+unknown parameter(s): searh_query (closest: search_query)
+```
+
+This makes typos easy to diagnose at the console or in a log.
+
+```python
+from meawfy import Query
+from meawfy.errors import InvalidParameter, UnknownParameter
+
+try:
+    query = Query("atlas", searh_query="atlas")   # typo
+except UnknownParameter as exc:
+    print(exc.names)   # ("searh_query",)
+    # message: "unknown parameter(s): searh_query (closest: search_query)"
+
+# One except block covers both InvalidParameter and UnknownParameter:
+try:
+    query = Query("atlas", searh_query="atlas")
+except InvalidParameter as exc:
+    print(f"parameter problem: {exc}")
+```
+
+**Source definition:**
+
+```python
+class UnknownParameter(InvalidParameter):
+    def __init__(self, names: Sequence[str], known: Sequence[str] = ()) -> None:
+        self.names = tuple(names)
+        self.known = tuple(known)
+        self.name = self.names[0]
+        self.value = None
+        self.reason = "unknown parameter: not one of the 50 documented names"
+        joined = ", ".join(self.names)
+        hint = ""
+        if self.known:
+            hint = f" (closest: {max(self.known, key=lambda k: _similarity(k, self.name))})"
+        Exception.__init__(self, f"unknown parameter(s): {joined}{hint}")
+```
+
+</Accordion>
+
+<Accordion title="DeepPagingError — the 10,000-row cap enforced before the request">
+
+`DeepPagingError` is a subclass of `InvalidParameter` raised when `page × per_page` would exceed 10,000 rows. It is raised **before the request is sent**.
+
+The endpoint does not refuse deep pages — it keeps answering with the cap applied, which means a request for `page=200&per_page=100` returns page 100 of the result set rather than an error or an empty page. Without this guard, a loop could silently collect the same trailing rows over and over, and nothing in the response would indicate the problem. Handbook trap 8.
+
+**Why a subclass of `InvalidParameter`:** the `page` and `per_page` combination is itself an invalid parameter set, and catching `InvalidParameter` covers it alongside every other pre-flight validation failure.
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy.errors import DeepPagingError, InvalidParameter
+
+client = MeawfyClient()
+
+# Raises DeepPagingError: 101 × 100 = 10,100 > 10,000
+try:
+    query = Query("atlas", page=101, per_page=100)
+    envelope = client.search(query)
+except DeepPagingError as exc:
+    print(exc)
+    # "page=101 rejected: 101 × 100 = 10,100 exceeds the 10,000-row window"
+```
+
+**Handling with query narrowing:**
+
+When you hit the cap, the correct response is to narrow the filters rather than paginate deeper. Add `ext`, `min_size`/`max_size`, or `providers` constraints to reduce the result set to below 10,000 rows.
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy.errors import DeepPagingError
+
+client = MeawfyClient()
+
+def search_with_narrowing(search_query: str, page: int, per_page: int = 100) -> list:
+    try:
+        query = Query(search_query, page=page, per_page=per_page)
+        return list(client.search(query).results)
+    except DeepPagingError:
+        # The result set is too large to page this deep.
+        # Narrow by extension to bring the total under 10,000 rows.
+        query = Query(search_query, page=1, per_page=per_page, ext="pdf")
+        return list(client.search(query).results)
+```
+
+<Note>
+  `client.collect()` handles this automatically: it stops walking pages once the 10,000-row window is reached and sets `Collection.truncated = True`. You do not need to catch `DeepPagingError` when using `collect()`.
+</Note>
+
+**Source definition:**
+
+```python
+class DeepPagingError(InvalidParameter):
+    """``page x per_page`` left the reachable window of 10,000 rows.
+
+    Above the cap the endpoint keeps answering with the cap applied, so a deeper
+    page is not empty but misleading. The client refuses the request instead.
+    """
+```
+
+</Accordion>
+
+<Accordion title="ResponseError — a 200 that is not a success">
+
+`ResponseError` is raised when the response body contains an `error` object under an HTTP `200` status. This is Handbook trap 2: the endpoint returns `200` to malformed requests and encodes the failure in the body. Without this class, every `200` would look like a success.
+
+**Attributes:**
+
+<ResponseField name="code" type="str" required>
+  The error code from the body's `error` object, e.g. `"INVALID_QUERY"` or `"RATE_LIMIT"`.
+</ResponseField>
+
+<ResponseField name="message" type="str" required>
+  The human-readable message from the error object.
+</ResponseField>
+
+<ResponseField name="envelope" type="Envelope | None">
+  The full `Envelope` object that carried the error, available for inspection. May be `None` if parsing failed before an `Envelope` could be constructed.
+</ResponseField>
+
+The message format is `{code}: {message}`.
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy.errors import ResponseError
+
+client = MeawfyClient()
+
+try:
+    envelope = client.search(Query("atlas"))
+except ResponseError as exc:
+    print(exc.code)       # e.g. "INVALID_QUERY"
+    print(exc.message)    # human-readable explanation
+    if exc.envelope:
+        print(exc.envelope.payload)   # the full raw body
+```
+
+**Alternative: branching on `Envelope.ok`**
+
+If you would rather branch on the envelope directly than catch an exception — for example, in a pipeline that treats errors as data — `Envelope.ok` is `False` whenever the body carries an `error` object:
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+
+envelope = client.search_raw(Query("atlas"))   # does not raise ResponseError
+if not envelope.ok:
+    error = envelope.error   # {'code': '...', 'message': '...'}
+    print(f"body error: {error['code']}: {error['message']}")
+else:
+    for row in envelope.results:
+        print(row.name)
+```
+
+<Note>
+  `client.search()` raises `ResponseError` on a body-level error. `client.search_raw()` returns the envelope regardless, and leaves the branch to the caller.
+</Note>
+
+**Source definition:**
+
+```python
+class ResponseError(MeawfyError):
+    """The body carried an ``error`` object, under an HTTP ``200``."""
+
+    def __init__(self, code: str, message: str, envelope: Any = None) -> None:
+        self.code = code
+        self.message = message
+        self.envelope = envelope
+        super().__init__(f"{code}: {message}")
+```
+
+</Accordion>
+
+<Accordion title="TransportError — DNS, TLS, timeout, and HTTP errors">
+
+`TransportError` is raised when the request never produced a usable JSON body: the connection dropped, DNS failed, TLS negotiation timed out, the server returned a non-JSON body, or any other condition that prevented parsing a response. It is the transport layer's counterpart to `ResponseError` at the application layer.
+
+**Attributes:**
+
+<ResponseField name="status" type="int | None">
+  The HTTP status code, if the server responded with one. `None` when the failure happened before a response was received (DNS, TLS, timeout, dropped connection).
+</ResponseField>
+
+<ResponseField name="payload" type="Mapping[str, Any] | None">
+  The parsed response body, if one was available and could be decoded as JSON. `None` in most transport failures.
+</ResponseField>
+
+```python
+from meawfy import MeawfyClient, Query
+from meawfy.errors import TransportError
+
+client = MeawfyClient()
+
+try:
+    envelope = client.search(Query("atlas"))
+except TransportError as exc:
+    if exc.status is not None:
+        print(f"HTTP {exc.status}")
+    else:
+        print(f"connection failure: {exc}")
+```
+
+<Note>
+  `TransportError` is the parent of `RateLimited`. Catching `TransportError` catches rate-limit errors too. If you want to handle the two cases differently, catch `RateLimited` first in a chained except.
+</Note>
+
+**The retry policy**
+
+`MeawfyClient` retries `TransportError` (5xx status codes and dropped connections) automatically, with exponential backoff and jitter. The number of attempts is controlled by `max_retries` (default 3). A `TransportError` reaching your code means all retries were exhausted.
+
+**Source definition:**
+
+```python
+class TransportError(MeawfyError):
+    """The request never produced a JSON body: HTTP error, DNS, TLS or timeout."""
+
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.status = status
+        self.payload = payload
+        super().__init__(message)
+```
+
+</Accordion>
+
+<Accordion title="RateLimited — the 429 wall">
+
+`RateLimited` is a subclass of `TransportError` raised on a `429 Too Many Requests` response. It is the only place in the endpoint's protocol where the HTTP status code is the signal — everything else, including application-level errors, arrives under a `200`.
+
+The endpoint allows 120 requests per minute. Each response carries an `X-RateLimit-Remaining` header counting down. When that counter reaches zero, the endpoint returns `429` with a `Retry-After` header in seconds.
+
+**Attributes:**
+
+<ResponseField name="retry_after" type="float | None">
+  The number of seconds to wait before retrying, from the `Retry-After` response header. `None` when the header is absent or unparseable. The header may carry either a number of seconds or an HTTP-date; the client normalises both to a float number of seconds.
+</ResponseField>
+
+<ResponseField name="status" type="int">
+  Always `429`. Inherited from `TransportError`.
+</ResponseField>
+
+<ResponseField name="payload" type="Mapping[str, Any] | None">
+  The parsed response body, if any. Inherited from `TransportError`.
+</ResponseField>
+
+```python
+import time
+from meawfy import MeawfyClient, Query
+from meawfy.errors import RateLimited, TransportError
+
+client = MeawfyClient()
+
+try:
+    envelope = client.search(Query("atlas"))
+except RateLimited as exc:
+    wait = exc.retry_after or 60.0
+    print(f"rate limited — waiting {wait:.0f}s")
+    time.sleep(wait)
+    # retry the call
+except TransportError as exc:
+    print(f"transport failure (status={exc.status}): {exc}")
+```
+
+**Automatic handling by `MeawfyClient`**
+
+You will rarely see `RateLimited` in application code because `MeawfyClient` handles it automatically:
+
+- A **local sliding-window rate limiter** paces requests to stay within the 120-per-minute budget before a `429` is ever issued.
+- When a `429` arrives despite local pacing, the client reads `Retry-After`, sleeps for exactly that duration, and retries — up to `max_retries` times.
+- A `Retry-After` longer than `max_retry_after` (default 60 s) is treated as a stop signal rather than a wait; the `RateLimited` exception is re-raised.
+
+`RateLimited` reaches your code only when retries are exhausted or when the backoff exceeds `max_retry_after`.
+
+```python
+# Check how much budget is left without making a request:
+print(client.remaining)   # reads the last X-RateLimit-Remaining header
+
+# Disable local pacing entirely (the 429 will still be honoured):
+client_no_throttle = MeawfyClient(requests_per_minute=10**9)
+```
+
+<Warning>
+  The 120-request budget is shared with the site's own front end. A `collect()` call over a broad query can exhaust dozens of requests. Read `client.remaining` and pace locally to avoid hitting the wall.
+</Warning>
+
+**Source definition:**
+
+```python
+class RateLimited(TransportError):
+    """``429 Too Many Requests``, the only place where the status code is the signal."""
+
+    def __init__(
+        self,
+        message: str = "429 Too Many Requests",
+        retry_after: float | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.retry_after = retry_after
+        super().__init__(message, status=429, payload=payload)
+```
+
+</Accordion>
+
+---
+
+## Handling patterns
+
+The patterns below cover the most common cases. Each targets the narrowest exception class that is correct for the situation.
+
+<Tabs>
+  <Tab title="Catch everything">
+    Use `MeawfyError` as the single catch-all for any script or CLI tool that wants one handler for all package failures:
+
+    ```python
+    from meawfy import MeawfyClient, Query
+    from meawfy.errors import MeawfyError
+
+    client = MeawfyClient()
+
+    try:
+        envelope = client.search(Query("periodic table", providers="mega"))
+        for row in envelope.results:
+            print(row.name, row.url)
+    except MeawfyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    ```
+  </Tab>
+  <Tab title="InvalidParameter only">
+    Catching `InvalidParameter` covers `UnknownParameter` and `DeepPagingError` too, because both are subclasses. This is the right handler for input validation pipelines that want to surface parameter mistakes before retrying with corrected values:
+
+    ```python
+    from meawfy import Query
+    from meawfy.errors import InvalidParameter, UnknownParameter
+
+    def build_query(user_params: dict) -> Query:
+        try:
+            return Query(**user_params)
+        except UnknownParameter as exc:
+            # The hint is already in the message:
+            # "unknown parameter(s): searh_query (closest: search_query)"
+            raise ValueError(str(exc)) from exc
+        except InvalidParameter as exc:
+            raise ValueError(f"{exc.name}: {exc.reason}") from exc
+    ```
+  </Tab>
+  <Tab title="RateLimited with retry_after">
+    `MeawfyClient` retries `429` responses automatically. Handle `RateLimited` only when you need custom behaviour, such as logging the wait or implementing your own backoff strategy:
+
+    ```python
+    import time
+    from meawfy import MeawfyClient, Query
+    from meawfy.errors import RateLimited
+
+    client = MeawfyClient(max_retries=0)   # disable automatic retries for this example
+
+    def search_with_backoff(query: Query, max_attempts: int = 5):
+        for attempt in range(max_attempts):
+            try:
+                return client.search(query)
+            except RateLimited as exc:
+                if attempt == max_attempts - 1:
+                    raise
+                wait = exc.retry_after or (60.0 * (attempt + 1))
+                print(f"rate limited, waiting {wait:.0f}s (attempt {attempt + 1})")
+                time.sleep(wait)
+    ```
+  </Tab>
+  <Tab title="Envelope.ok vs ResponseError">
+    Two styles for handling body-level errors. Use `ResponseError` in call-site code that wants exceptions to propagate; use `Envelope.ok` in pipeline code that treats errors as data:
+
+    ```python
+    from meawfy import MeawfyClient, Query
+    from meawfy.errors import ResponseError
+
+    client = MeawfyClient()
+
+    # Style 1: exception-based (client.search raises on body error)
+    try:
+        envelope = client.search(Query("atlas"))
+    except ResponseError as exc:
+        print(f"body error {exc.code}: {exc.message}")
+
+    # Style 2: branch on Envelope.ok (client.search_raw never raises ResponseError)
+    envelope = client.search_raw(Query("atlas"))
+    if not envelope.ok:
+        err = envelope.error
+        print(f"body error {err['code']}: {err['message']}")
+    else:
+        for row in envelope.results:
+            print(row.name)
+    ```
+  </Tab>
+  <Tab title="DeepPagingError with narrowing">
+    When `page × per_page > 10,000`, narrow the query rather than reducing the page number. The correct fix is a smaller result set, not a shallower page:
+
+    ```python
+    from meawfy import MeawfyClient, Query
+    from meawfy.errors import DeepPagingError
+
+    client = MeawfyClient()
+
+    def paginate_safely(search_query: str, target_page: int, per_page: int = 100):
+        """Attempt deep pagination; narrow by extension on DeepPagingError."""
+        try:
+            query = Query(search_query, page=target_page, per_page=per_page)
+            return client.search(query)
+        except DeepPagingError as exc:
+            print(
+                f"Page {target_page} × {per_page} = {target_page * per_page} "
+                f"exceeds 10,000-row cap. Narrowing to ext=pdf and restarting from page 1."
+            )
+            query = Query(search_query, page=1, per_page=per_page, ext="pdf")
+            return client.search(query)
+    ```
+
+    <Tip>
+      Use `client.collect(query, max_rows=N)` to collect up to `N` rows automatically. It stops at the 10,000-row window and sets `Collection.truncated = True` without raising `DeepPagingError`.
+    </Tip>
+  </Tab>
+</Tabs>
+
+---
+
+## Handbook trap mapping
+
+Each exception class corresponds to a named failure mode from *The Query Handbook*, Part VI:
+
+| Exception | Handbook trap | When it's raised |
+|-----------|--------------|-----------------|
+| `UnknownParameter` | Trap 1 — "An unknown parameter is ignored" | Before the request, on an unrecognised parameter name |
+| `ResponseError` | Trap 2 — "A 200 is not a success" | After the request, when the body contains an `error` object |
+| `InvalidParameter` | Trap 4/5 — silent enum fall-through, value caps | Before the request, on any out-of-vocabulary or out-of-range value |
+| `RateLimited` | Trap 7 — "120 requests per minute — then a wall" | On a `429` response, after retries are exhausted |
+| `DeepPagingError` | Trap 8 — "Paging stops at ten thousand rows" | Before the request, when `page × per_page > 10,000` |
+| `TransportError` | (below HTTP) | On DNS failure, TLS error, timeout, or non-JSON response |

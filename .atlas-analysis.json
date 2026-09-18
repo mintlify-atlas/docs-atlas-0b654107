@@ -1,0 +1,129 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Meawfy Client",
+  "projectDescription": "A stdlib-only Python client for the Meawfy file-index API that validates all 50 query parameters, handles rate limiting and paging, and surfaces the endpoint's silent failure modes as typed exceptions.",
+  "theme": "luma",
+  "primaryColor": "#6366f1",
+  "lightColor": "#ffffff",
+  "darkColor": "#8c8cf4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/endpoint",
+              "concepts/pipeline",
+              "concepts/echo-and-traps"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/paging-and-collecting",
+              "guides/recipes",
+              "guides/verification-and-diff",
+              "guides/fixtures-and-testing",
+              "guides/rate-limiting"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/overview",
+              "cli/commands"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Client",
+            "pages": [
+              "api/client",
+              "api/retry-policy",
+              "api/transport"
+            ]
+          },
+          {
+            "group": "Query & Parameters",
+            "pages": [
+              "api/query",
+              "api/parameters"
+            ]
+          },
+          {
+            "group": "Response Objects",
+            "pages": [
+              "api/envelope",
+              "api/result",
+              "api/reports"
+            ]
+          },
+          {
+            "group": "Errors",
+            "pages": [
+              "api/errors"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Validates all 50 endpoint parameters before any network call, raising typed errors instead of silently sending malformed requests",
+    "Sliding-window rate limiter that paces at 120 req/min, honours Retry-After, and exposes remaining capacity",
+    "Multi-page helpers (iterate, collect) that stop safely at the undocumented 10,000-row window",
+    "Echo-report comparison that detects parameters the index silently dropped (the handbook's primary debugging tool)",
+    "verify() and diff() helpers for two-call parameter auditing and cross-drive content comparison",
+    "Replay transport and fixture system for pinning a tested response against an unversioned endpoint",
+    "Eight recipes (R7–R14) from The Query Handbook as first-class callable objects",
+    "Full CLI (python -m meawfy) with flags for every parameter, plus dedicated commands for recipes, verification, diff, and dead-row sweeps",
+    "Zero dependencies — standard library only (urllib, argparse)"
+  ],
+  "publicApiSurface": [
+    "MeawfyClient",
+    "MeawfyClient.search()",
+    "MeawfyClient.search_raw()",
+    "MeawfyClient.url_for()",
+    "MeawfyClient.iterate()",
+    "MeawfyClient.collect()",
+    "MeawfyClient.verify()",
+    "MeawfyClient.diff()",
+    "MeawfyClient.dead_rows()",
+    "MeawfyClient.run_recipe()",
+    "MeawfyClient.save_envelope()",
+    "MeawfyClient.stats",
+    "MeawfyClient.remaining",
+    "RetryPolicy",
+    "RateLimiter",
+    "Transport / TransportResponse",
+    "urllib_transport",
+    "replay_transport",
+    "Query",
+    "Envelope",
+    "Result",
+    "Preview",
+    "EchoReport",
+    "Collection",
+    "VerificationReport",
+    "DiffReport",
+    "MeawfyError / InvalidParameter / UnknownParameter / DeepPagingError / ResponseError / RateLimited / TransportError",
+    "params_for()",
+    "RECIPES / Recipe",
+    "PARAMS / LOAD_BEARING / CAPS / PROVIDERS / KNOWN_PROVIDERS / EXPERIMENTAL_PROVIDERS",
+    "format_size / parse_size / parse_date / parse_range / normalise"
+  ]
+}

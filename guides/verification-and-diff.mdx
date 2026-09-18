@@ -1,0 +1,358 @@
+---
+title: "Verification, Diff, and Dead-Row Helpers"
+sidebarTitle: "Verify & Diff"
+description: "Use verify(), diff(), and dead_rows() to detect silent parameter drops, compare drive content, and sweep for dead links before the 72-hour purge window closes."
+---
+
+The endpoint answers 200 to everything, so a parameter that the index stopped honouring produces no error, no warning, and no change in the response shape — just a different (usually larger) result set. These three helpers make the silent failures visible.
+
+## `client.verify()` — did the index honour this parameter?
+
+`verify()` sends the same query twice: once with the parameter, once without. It then compares what the endpoint echoed back for each call. The echo is what the endpoint *understood*, not what you sent — a parameter missing from the echo did nothing.
+
+```python
+def verify(
+    name: str,           # wire name of the parameter to test
+    value: Any,          # the value to send
+    query=None,          # base query, or keyword params
+    **params,
+) -> VerificationReport: ...
+```
+
+<Warning>
+`verify()` makes **two** real requests, both counted against the 120-requests-per-minute budget. Do not call it in a tight loop.
+</Warning>
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# Did the index honour min_mirrors=2?
+report = client.verify("min_mirrors", 2, "worksheet")
+print(report.explain())
+# min_mirrors=2: honoured, the echo reports '2';
+# total 8,412 -> 1,039
+```
+
+### The three verdicts
+
+`VerificationReport.verdict` is one of three strings:
+
+<Tabs>
+  <Tab title="honoured">
+    The parameter appeared in the echo with a value equal to what was sent. The set changed (or stayed the same for a parameter that legitimately changes nothing at the current default).
+
+    ```
+    min_mirrors=2: honoured, the echo reports '2'; total 8,412 -> 1,039
+    ```
+  </Tab>
+  <Tab title="rewritten">
+    The parameter appeared in the echo but with a different value. The endpoint understood the name but normalised or clamped the value.
+
+    ```
+    sort=Size: rewritten, the echo reports 'relevance' instead; total 8,412 -> 8,412
+    ```
+  </Tab>
+  <Tab title="ignored">
+    The parameter was absent from the echo entirely. This is the handbook's definition of "did nothing" — the name moved, was never supported, or is equal to the endpoint's own default.
+
+    ```
+    min_mirrors=2: ignored, absent from the echo, so it changed nothing (total stayed 8,412).
+    A value equal to the documented default may be omitted legitimately;
+    anything else means the name moved.
+    ```
+  </Tab>
+</Tabs>
+
+### `VerificationReport` fields
+
+<ResponseField name="name" type="str">
+  The parameter name that was tested.
+</ResponseField>
+
+<ResponseField name="sent" type="str">
+  The normalised wire value that was actually sent.
+</ResponseField>
+
+<ResponseField name="echoed" type="Any">
+  What appeared in the echo for this parameter, or `None` when absent.
+</ResponseField>
+
+<ResponseField name="verdict" type="str">
+  `"honoured"`, `"rewritten"`, or `"ignored"`.
+</ResponseField>
+
+<ResponseField name="total_without" type="int">
+  The total row count from the baseline call (without the parameter).
+</ResponseField>
+
+<ResponseField name="total_with" type="int">
+  The total row count from the candidate call (with the parameter).
+</ResponseField>
+
+<ResponseField name="warnings" type="tuple[str, ...]">
+  Any warning strings from the candidate envelope.
+</ResponseField>
+
+<ResponseField name="remaining" type="int | None">
+  The `X-RateLimit-Remaining` value from the last response, or `None` if the header was absent.
+</ResponseField>
+
+### Using `verify()` from the CLI
+
+```bash
+# Did min_mirrors=2 act on "worksheet"?
+python3 -m meawfy verify min_mirrors 2 "worksheet"
+
+# Add extra filters to both calls with --set
+python3 -m meawfy verify checked_after "2026-01-01" "worksheet" --set providers=mega
+
+# Exit code is 5 when the parameter was not honoured, 0 when honoured
+python3 -m meawfy verify min_files 10 "course pack" && echo "honoured" || echo "not honoured"
+```
+
+The CLI exits with code **5** when the verdict is `rewritten` or `ignored`, and **0** when `honoured`.
+
+---
+
+## `client.diff()` — compare two drives on a content key
+
+`diff()` is recipe R12 as a helper. It sends one query per drive, then compares the results on a content key — `hash` by default. Diffing on `hash` separates the drive that has the actual content from the drive that has a copy of the title.
+
+```python
+def diff(
+    query=None,
+    *,
+    left: str = "mega",       # first provider (default: mega)
+    right: str = "gdrive",    # second provider (default: gdrive)
+    key: str = "hash",        # row field to diff on
+    fields: str | None = None,
+    **params,
+) -> DiffReport: ...
+```
+
+<Warning>
+`diff()` makes **two** real requests. Both count against the rate limit. It only compares the first page of each provider — `DiffReport.partial` will be `True` when either side has more rows than `per_page`.
+</Warning>
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+report = client.diff(
+    "trading post",
+    left="mega",
+    right="gdrive",
+    key="hash",
+)
+print(report.explain())
+# mega vs gdrive on hash: 12 shared, 88 only in mega, 34 only in gdrive
+# 5 name(s) appear on both sides with a different hash: the drive that has
+# the content versus the drive that has a copy of its title
+```
+
+### `DiffReport` fields
+
+<ResponseField name="left" type="str">
+  The first provider name.
+</ResponseField>
+
+<ResponseField name="right" type="str">
+  The second provider name.
+</ResponseField>
+
+<ResponseField name="key" type="str">
+  The field the comparison was made on.
+</ResponseField>
+
+<ResponseField name="left_total" type="int">
+  Total rows reported by the endpoint for the left provider.
+</ResponseField>
+
+<ResponseField name="right_total" type="int">
+  Total rows reported by the endpoint for the right provider.
+</ResponseField>
+
+<ResponseField name="shared_keys" type="tuple[str, ...]">
+  Key values that appear in both result sets — content that both drives genuinely share.
+</ResponseField>
+
+<ResponseField name="left_only_keys" type="tuple[str, ...]">
+  Key values that appear only in the left provider's results.
+</ResponseField>
+
+<ResponseField name="right_only_keys" type="tuple[str, ...]">
+  Key values that appear only in the right provider's results.
+</ResponseField>
+
+<ResponseField name="same_name_different_key" type="tuple[str, ...]">
+  File names that appear on both sides but with a different key value. These are title collisions: the same name, different content.
+</ResponseField>
+
+<ResponseField name="overlap" type="int">
+  The count of shared keys — a property derived from `len(shared_keys)`.
+</ResponseField>
+
+<ResponseField name="partial" type="bool">
+  `True` when either provider reported more rows than one page. Only the first page of each was compared; narrow the query to compare the rest.
+</ResponseField>
+
+### Using `diff()` from the CLI
+
+```bash
+# Compare MEGA and Google Drive on content hash
+python3 -m meawfy diff "trading post" --left mega --right gdrive
+
+# Use a different key
+python3 -m meawfy diff "atlas of human anatomy" --key hash --max-size 400mb
+
+# JSON output for downstream processing
+python3 -m meawfy diff "trading post" --json
+```
+
+### Full example from `diff_drives.py`
+
+```python
+from meawfy import PROVIDERS, MeawfyClient
+from meawfy.render import table
+
+client = MeawfyClient()
+
+report = client.diff(
+    "atlas of human anatomy",
+    left="mega",
+    right="gdrive",
+    key="hash",
+    max_size="400mb",
+)
+print(report.explain())
+
+buckets = (
+    ("shared", report.shared_keys),
+    (f"only {report.left}", report.left_only_keys),
+    (f"only {report.right}", report.right_only_keys),
+    (f"same name, different {report.key}", report.same_name_different_key),
+)
+rows = [
+    [where, value]
+    for where, values in buckets
+    for value in values[:8]
+]
+if rows:
+    print(table(["WHERE", report.key.upper() + " / NAME"], rows))
+
+if report.partial:
+    print(
+        f"note: {report.left} reports {report.left_total} rows, "
+        f"{report.right} reports {report.right_total}; "
+        "only the first page was compared"
+    )
+
+# Exit 0 when the sides share at least one key
+raise SystemExit(0 if report.overlap else 1)
+```
+
+---
+
+## `client.dead_rows()` — sweep for recently dead links
+
+`dead_rows()` is recipe R11 as a helper. It queries for rows with `alive=False` and `checked_after` set to the start of the purge window, then sorts oldest-check-first so you can process the most at-risk rows before they disappear.
+
+```python
+def dead_rows(
+    *,
+    within_hours: int = 72,  # default is the full grace window
+    **params,
+) -> Envelope: ...
+```
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# Everything detected dead in the last 72 hours
+envelope = client.dead_rows()
+print(f"dead rows in window: {envelope.total}")
+
+for row in envelope.results:
+    print(f"{row.cell('checked_at')}  {row.get('provider')}  {row.get('url')}")
+```
+
+### The 72-hour purge window
+
+When a link becomes inaccessible the index marks the row dead and retains it for **72 hours**. After that the row is purged entirely — not marked, not archived, not retrievable through any parameter. There is no way to reach a row that has already been purged.
+
+<Warning>
+Asking for `within_hours` greater than 72 is not an error, but it returns nothing extra. Rows older than 72 hours are gone from the index. The client emits an advice note when you exceed the window.
+</Warning>
+
+```python
+from meawfy import MeawfyClient, CAPS
+
+client = MeawfyClient()
+
+# Narrow the window to the most recent 24 hours
+envelope = client.dead_rows(within_hours=24)
+
+# Combine with a provider filter
+envelope = client.dead_rows(within_hours=48, providers="mega")
+```
+
+### Walking dead rows with `iterate()`
+
+When there are more than 100 dead rows in the window — the `per_page` ceiling — use `iterate()` to walk all of them:
+
+```python
+from meawfy import CAPS, MeawfyClient, Query
+from datetime import date, timedelta
+
+client = MeawfyClient()
+
+since = (date.today() - timedelta(hours=72)).isoformat()
+query = Query(
+    alive=False,
+    checked_after=since,
+    sort="checked",
+    order="asc",
+    fields="id,provider,url,checked_at,indexed_at,size",
+)
+
+rows = list(client.iterate(query, per_page=CAPS["per_page_max"]))
+print(f"collected {len(rows)} dead row(s)")
+```
+
+### Using `dead` from the CLI
+
+```bash
+# Default 72-hour window
+python3 -m meawfy dead
+
+# Narrow to the last 24 hours
+python3 -m meawfy dead --within-hours 24
+
+# JSON for a script
+python3 -m meawfy dead --json
+
+# Exit code is 4 when no dead rows were found
+python3 -m meawfy dead || echo "no dead rows"
+```
+
+---
+
+## Exit codes for verification and diff
+
+| Command | Exit code | When |
+|---------|-----------|------|
+| `verify` | `0` | Parameter was honoured |
+| `verify` | `5` | Parameter was rewritten or ignored |
+| `dead` | `0` | At least one dead row found |
+| `dead` | `4` | No dead rows in the window |
+| `diff` | `0` | The two sides share at least one key |
+| `diff` | `1` (from example script) | No shared keys found |
+
+<Note>
+Exit code `4` (no rows) is also available on `search` with the `--fail-on-empty` flag, making it easy to gate a pipeline on whether a query returns anything.
+</Note>

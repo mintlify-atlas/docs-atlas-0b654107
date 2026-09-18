@@ -1,0 +1,552 @@
+---
+title: "Query Parameters — All 50 Fields for Meawfy Search"
+sidebarTitle: "Parameters"
+description: "Complete reference for all 50 query parameters of the Meawfy results endpoint, including statuses, caps, sort keys, weight presets, and provider constants."
+---
+
+The Meawfy results endpoint (`GET https://meawfy.com/internal/api/results.json`) accepts exactly 50 documented query parameters across ten groups. Each parameter carries a status that describes the endpoint's commitment to honouring it, and seven of them are load-bearing — the names the site's own front end reads on every page load.
+
+<Note>
+**Parameter status meanings**
+
+| Status | Meaning |
+|---|---|
+| `contract` | The index answers it today and the site's own front end depends on it. These are the parameters you can rely on. |
+| `planned` | Specified in the handbook but not yet exercised by a client. The index may not honour it; always read the echo. |
+| `reserved` | A name kept free. Sending it changes nothing and says nothing about why. |
+
+`*` marks the seven **load-bearing** parameters: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`. These are what sheet 19 of *The Query Handbook* calls the whole contract.
+</Note>
+
+## Constants
+
+The following constants are importable from `meawfy.params`:
+
+```python
+from meawfy.params import (
+    LOAD_BEARING,
+    CAPS,
+    PROVIDERS,
+    EXPERIMENTAL_PROVIDERS,
+    KNOWN_PROVIDERS,
+)
+
+LOAD_BEARING         # frozenset: {'search_query', 'providers', 'sort', 'order',
+                     #             'page', 'per_page', 'fields'}
+
+PROVIDERS            # ('mega', 'dropbox', 'gdrive')
+
+EXPERIMENTAL_PROVIDERS  # ('rapidshare', 'pixeldrain', 'filebin', 'gofile',
+                         #  'catbox', '1fichier', 'uploadhaven', 'krakenfiles')
+
+KNOWN_PROVIDERS      # PROVIDERS + EXPERIMENTAL_PROVIDERS (11 total)
+
+CAPS                 # {
+                     #   'parameters': 50,
+                     #   'per_page_max': 100,
+                     #   'page_window_max': 10_000,
+                     #   'search_query_chars': 200,
+                     #   'weight_fields': 4,
+                     #   'extensions': 20,
+                     #   'requests_per_minute': 120,
+                     #   'dead_row_grace_hours': 72,
+                     # }
+```
+
+## Caps
+
+The client enforces these limits before sending any request:
+
+| Cap | Value | Client behaviour |
+|---|---|---|
+| `per_page` | ≤ 100 | `InvalidParameter` above the ceiling |
+| `page × per_page` | ≤ 10,000 | `DeepPagingError` before the request; `collect()` sets `truncated` |
+| `search_query` length | ≤ 200 characters | `InvalidParameter` with the actual character count |
+| Weight fields | ≤ 4 | `InvalidParameter` |
+| Extensions (`ext`, `exclude_ext`) | ≤ 20 | `InvalidParameter` |
+| Rate limit | 120 requests/minute | Sliding-window pacing; `Retry-After` honoured on `429` |
+| Dead-row grace period | 72 hours | `dead_rows()` builds the window; purged rows have no workaround |
+
+---
+
+## Core search
+
+These parameters describe what you are looking for and which files qualify.
+
+<ParamField query="search_query" type="string" required>
+  **`*` load-bearing · `contract`**
+
+  Free text matched against the file name and folder path. The site's own tokenizer applies: a space between terms means AND, a leading `-` negates a term, and `OR` (uppercase) is a disjunction. Capped at 200 characters; the client raises `InvalidParameter` if exceeded. The wire alias `q` is interchangeable on the client side; `search_query` wins when both are sent.
+
+  ```python
+  Query("climate report OR global warming", providers="mega")
+  Query("periodic table -chemistry", max_size="100mb")
+  ```
+</ParamField>
+
+<ParamField query="q" type="string">
+  **`contract`**
+
+  Alias for `search_query`, kept for bookmarklets and old links. When both `q` and `search_query` are present in the same request, `search_query` wins. Identical 200-character cap and normalisation rules apply.
+</ParamField>
+
+<ParamField query="providers" type="string" default="all three">
+  **`*` load-bearing · `contract`**
+
+  Comma-separated list or repeated key selecting which drives to search. Accepted values: `mega`, `dropbox`, `gdrive`. The client also accepts the eight experimental hosts (see below); a `Query` emitting an experimental provider surfaces an advisory note.
+
+  ```python
+  Query("atlas", providers="mega,dropbox")
+  Query("atlas", providers=["mega", "gdrive"])
+  ```
+</ParamField>
+
+<ParamField query="provider" type="string">
+  **`contract`**
+
+  Singular form. `provider=dropbox` and `providers=dropbox` produce the same request. Use `providers` when selecting multiple drives; use `provider` when the intent is one drive and the singular form reads more clearly.
+</ParamField>
+
+<ParamField query="source_domain" type="string">
+  **`planned`**
+
+  Which site the public share URL was first discovered on. This is provenance metadata, not an authoritative source identifier. The parameter is specified in the handbook but not yet exercised; read the echo to confirm it was honoured.
+</ParamField>
+
+<ParamField query="ext" type="string" default="all">
+  **`contract`**
+
+  Comma-separated list of file extensions, lowercase, without a leading dot: `pdf,epub,docx`. The endpoint's equivalent of a `filetype:` operator. At most 20 extensions per request; the client raises `InvalidParameter` above that.
+
+  ```python
+  Query("lecture notes", ext="pdf,epub")
+  Query("course pack", ext=["mp4", "mkv", "avi"])
+  ```
+</ParamField>
+
+<ParamField query="exclude_ext" type="string">
+  **`planned`**
+
+  Drops the listed extensions from results. Accepts the same comma-separated format as `ext`. More readable in logs than chaining negated terms. The same 20-extension cap applies.
+</ParamField>
+
+<ParamField query="license" type="string">
+  **`contract`**
+
+  Comma-separated list of license identifiers: `mit`, `gpl`, `cc-by`, `apache-2.0`. Case-insensitive. This is a closed vocabulary indexed alongside the files — not file metadata. Useful for open content discovery.
+</ParamField>
+
+<ParamField query="kind" type="string" default="any">
+  **`planned`**
+
+  Restricts results to `file`, `folder`, or `any`. Folders carry a `files` count and a `path`; files carry `size_bytes`. Several sort keys are meaningless across mixed kinds (`sort=files` only applies to folders; `sort=size` behaves differently on folders with unknown totals).
+</ParamField>
+
+<ParamField query="min_size" type="string | integer" default="0">
+  **`contract`**
+
+  Lower bound on file size, inclusive. Accepts bytes (`400000`) or a human suffix: `10mb`, `1.5gb`, `400kb`. Decimal SI units (`mb`, `gb`, `tb`) and binary IEC units (`mib`, `gib`, `tib`) are both accepted. Cross-checked against `max_size`: if `min_size > max_size`, `InvalidParameter` is raised at construction.
+</ParamField>
+
+<ParamField query="max_size" type="string | integer" default="∞">
+  **`contract`**
+
+  Upper bound on file size, inclusive. Accepts the same units as `min_size`. The README describes this as "the single most effective parameter on the endpoint" — a tight ceiling cuts noise more than any other single filter.
+
+  ```python
+  Query("worksheet", min_size="100kb", max_size="400mb")
+  ```
+</ParamField>
+
+<ParamField query="size_bucket" type="string">
+  **`planned`**
+
+  A coarse size band, intended for UI sliders rather than precise queries. Values: `small` (< 100 MB), `medium` (< 1 GB), `large` (< 10 GB), `huge` (≥ 10 GB). Cannot be combined with `min_size`/`max_size` in the same request through the UI, but the parameter vocabulary does not prevent it.
+</ParamField>
+
+<ParamField query="min_files" type="integer" default="0">
+  **`contract`**
+
+  Returns only folder rows with at least this many files inside. Ignored on file rows. Combined with `kind=folder` and `sort=files`, this is the core of recipe R7 (collection search).
+
+  ```python
+  Query("course pack", providers="dropbox", kind="folder", min_files=50, sort="files")
+  ```
+</ParamField>
+
+<ParamField query="max_files" type="integer" default="∞">
+  **`planned`**
+
+  Upper bound on the `files` field. `max_files=1` is an unusual but documented way to find a file that the indexer classified as a folder.
+</ParamField>
+
+---
+
+## Time and health
+
+These parameters filter on indexing dates and liveness state.
+
+<ParamField query="after" type="string">
+  **`contract`**
+
+  Indexed-date window start, `YYYY-MM-DD`, inclusive. This is the date the indexer first saw the row — not the original file creation date. Use `created_after` for the latter. Accepts `date`/`datetime` objects in addition to ISO strings; the client normalises to `YYYY-MM-DD`. Cross-checked against `before`: `after > before` raises `InvalidParameter`.
+</ParamField>
+
+<ParamField query="before" type="string">
+  **`contract`**
+
+  Indexed-date window end, `YYYY-MM-DD`, inclusive. Pair with `after` for a date range window. Date parsing and cross-checks apply as for `after`.
+</ParamField>
+
+<ParamField query="checked_after" type="string">
+  **`planned`**
+
+  Returns only rows whose liveness was checked after this date. Pairs with `alive=false` to find recently-detected dead rows within the 72-hour window before they are purged.
+
+  ```python
+  # Recipe R11: recently dead rows before they vanish
+  from datetime import date, timedelta
+  cutoff = (date.today() - timedelta(hours=72)).isoformat()
+  Query(alive=False, checked_after=cutoff, sort="checked", order="asc")
+  ```
+</ParamField>
+
+<ParamField query="alive" type="boolean" default="true">
+  **`contract`**
+
+  The default `true` returns only rows with a live link. Setting `alive=false` returns rows detected dead — but only those detected within the last 72 hours. After that window the row is purged entirely; no parameter can retrieve it. A `Query` with `alive=false` and no `checked_after` surfaces an advisory note about the 72-hour window.
+</ParamField>
+
+<ParamField query="dedupe" type="boolean" default="true">
+  **`contract`**
+
+  When `true` (the default), rows sharing the same content hash are collapsed to the row with the most mirrors. Set to `false` for deduplication audits or to see all copies of a file.
+</ParamField>
+
+<ParamField query="min_mirrors" type="integer" default="0">
+  **`planned`**
+
+  Returns only rows with at least this many independent copies sharing the same hash. A survival signal — more mirrors means more redundancy — but not a quality signal. Recipe R9 combines this with `dedupe=true` for robust results.
+</ParamField>
+
+---
+
+## Preview and media
+
+These parameters control thumbnail retrieval and media-specific filtering.
+
+<ParamField query="preview" type="integer" default="0">
+  **`planned`**
+
+  When set to `1`, each result includes a `preview` object containing `url`, `width`, `height`, and `mime`. The object is `null` on rows without a renderable thumbnail (documents, folders, and rows without an extractable frame). Setting `preview=1` adds the 17th row field to the response.
+
+  ```python
+  Query("documentary", ext="mp4,mkv", preview=1, resolution="720p",
+        sort="size", order="desc")
+  ```
+</ParamField>
+
+<ParamField query="has_preview" type="boolean">
+  **`planned`**
+
+  `true` restricts results to rows that have a preview available; `false` restricts to rows without one. Omitting the parameter ignores preview availability entirely. This parameter selects rows; `preview=1` is what returns the preview object with them.
+</ParamField>
+
+<ParamField query="preview_size" type="string" default="medium">
+  **`planned`**
+
+  Controls the CDN path in `preview.url`. Accepted values and their pixel widths:
+
+  | Value | Width |
+  |---|---|
+  | `tiny` | 64 px |
+  | `small` | 128 px |
+  | `medium` | 256 px |
+  | `large` | 512 px |
+
+  This parameter only affects the URL path for an already-existing preview. Setting `preview_size` without `preview=1` produces an advisory note.
+</ParamField>
+
+<ParamField query="resolution" type="string">
+  **`planned`**
+
+  Minimum source resolution of the original media file. Filters on the file's native dimensions, not the preview thumbnail. Accepted values: `480p`, `720p`, `1080p`, `4k`.
+</ParamField>
+
+<ParamField query="duration" type="string">
+  **`planned`**
+
+  Duration range in seconds for video and audio files. Accepts: `30-120` (between 30 and 120 s), `60-` (60 s or longer), `-300` (up to 300 s), `90` (exactly 90 s). Only rows where the indexer extracted a duration are matched; `Query` surfaces an advisory note when `ext` is not also specified.
+</ParamField>
+
+<ParamField query="page_count" type="string">
+  **`planned`**
+
+  Page range for documents. Same range syntax as `duration`: `1-10`, `50-`, `-100`. Only rows where the indexer extracted a page count are matched.
+</ParamField>
+
+---
+
+## Content metadata
+
+These parameters filter on content-level attributes extracted during indexing.
+
+<ParamField query="language" type="string">
+  **`planned`**
+
+  Comma-separated list of ISO 639-1 language codes: `en`, `es`, `fr`, `de`. Language is detected from the filename and, where available, from content analysis. The client validates each code against the `^[a-z]{2}(-[a-z]{2})?$` pattern.
+</ParamField>
+
+<ParamField query="author" type="string">
+  **`planned`**
+
+  Author or creator string, as extracted from file metadata. Substring match, case-insensitive. Useful for filtering PDFs, ebooks, and other document types that carry embedded author information.
+</ParamField>
+
+<ParamField query="tags" type="string">
+  **`planned`**
+
+  Comma-separated list of indexed tags. The logic is AND across different tags and OR within a tag's values. Tags use comma as the delimiter (not whitespace); the client handles lists and comma strings both.
+</ParamField>
+
+<ParamField query="format" type="string">
+  **`planned`**
+
+  Detailed format identifier beyond `ext`: `mp4`, `mkv`, `epub3`, `pdfa`. A closed vocabulary indexed alongside the files. More precise than `ext` for multi-format containers; for example, `ext=mkv` and `format=mkv` return the same set, but `format=h264` would select a codec regardless of container.
+</ParamField>
+
+---
+
+## Provenance and identity
+
+These parameters target specific rows by ID or content fingerprint.
+
+<ParamField query="id" type="string">
+  **`planned`**
+
+  Direct lookup by row ID. IDs are provider-prefixed: `mega:4f2a1b…`. Returns exactly one row or an empty set. Bypasses tokenisation and scoring entirely. A `Query` with `id` plus other parameters surfaces an advisory note: every other parameter can only narrow a result that was already one row or empty.
+</ParamField>
+
+<ParamField query="hash" type="string">
+  **`planned`**
+
+  Content hash lookup. Returns all rows sharing this hash across all three documented drives. Useful for deduplication workflows. A `Query` with `hash` plus `providers` or `provider` surfaces an advisory note: the hash lookup already crosses all providers, and a provider filter can only narrow it.
+</ParamField>
+
+<ParamField query="created_after" type="string">
+  **`planned`**
+
+  Original file creation date, `YYYY-MM-DD`, inclusive. Distinct from `after`, which filters on the indexed date. Cross-checked against `created_before`.
+</ParamField>
+
+<ParamField query="created_before" type="string">
+  **`planned`**
+
+  Original file creation date window end, `YYYY-MM-DD`, inclusive.
+</ParamField>
+
+---
+
+## Folder structure
+
+These parameters filter on where a row sits within the drive's directory tree.
+
+<ParamField query="folder_path" type="string">
+  **`planned`**
+
+  Folder path filter, case-insensitive. By default, the whole path must match. Prefix with `*` to turn it into a substring match: `*/courses/python` matches any path containing `courses/python`. A `Query` surfaces an advisory note when the `*` prefix is present as a reminder of this behaviour.
+
+  ```python
+  Query("node course", kind="folder", folder_path="*/courses", depth=2, sort="files")
+  ```
+</ParamField>
+
+<ParamField query="depth" type="string | integer">
+  **`planned`**
+
+  Folder depth from the drive root. Depth `1` is the top level; depth `2` is one level down. Accepts a single integer (`2`) or a range (`2-4`). One request per depth level is the idiomatic pattern when walking a tree.
+</ParamField>
+
+<ParamField query="parent" type="string">
+  **`reserved`**
+
+  Parent folder ID. Returns all direct children of this folder, regardless of `kind`. The name is reserved; the parameter may change without notice.
+</ParamField>
+
+---
+
+## Ordering and shape
+
+These parameters decide sort order and the structure of the response.
+
+<ParamField query="sort" type="string" default="relevance">
+  **`*` load-bearing · `contract`**
+
+  The sort key. Accepted values:
+
+  | Key | Orders by | Default direction | Notes |
+  |---|---|---|---|
+  | `relevance` | `score` | ↓ (always) | Ignores `order`; always best-first |
+  | `size` | `size_bytes` | ↓ | Folders with unknown totals sort last in both directions |
+  | `files` | `files` | ↓ | Meaningless unless `kind=folder` |
+  | `name` | `name` | ↑ | Case- and accent-insensitive |
+  | `indexed` | `indexed_at` | ↓ | The day the indexer saw it |
+  | `checked` | `checked_at` | ↓ | Last liveness check date |
+  | `mirrors` | `mirrors` | ↓ | Mirror count; survival, not quality |
+  | `has_preview` | preview present | ↓ | Preview-bearing rows first; requires `preview=1` |
+
+  The alias `_score` is accepted and normalised to `relevance`.
+</ParamField>
+
+<ParamField query="order" type="string" default="per key">
+  **`*` load-bearing · `contract`**
+
+  Sort direction: `asc` or `desc`. Ignored when `sort=relevance`, which is always descending. A `Query` with `order` but no explicit `sort` surfaces an advisory note.
+</ParamField>
+
+<ParamField query="weights" type="string" default="broad">
+  **`planned`**
+
+  Scoring weights, either as a preset name or as explicit field:weight pairs. Presets:
+
+  | Preset | Weights | Best for |
+  |---|---|---|
+  | `exact` | `name:3`, `path:1`, phrase required | A title you already know |
+  | `broad` (default) | `name:2`, `path:1`, `files:1` | A phrase you half-remember |
+  | `folder` | `files:3`, `path:2`, `name:1` | Collections rather than documents |
+  | `fresh` | recency decay on `indexed_at` ×2, everything else halved | What appeared since you last looked |
+
+  Custom weights use the form `name:3,path:1,files:2`. Valid fields: `name`, `path`, `files`, `mirrors`. At most 4 fields per request; the client raises `InvalidParameter` above that.
+
+  ```python
+  Query("atlas", weights="exact")
+  Query("course pack", weights="name:3,files:2")
+  ```
+</ParamField>
+
+<ParamField query="min_score" type="float" default="0">
+  **`planned`**
+
+  Relevance score threshold in the range `0.0`–`1.0`. Rows scoring below this value are cut before the page window is applied. Useful for cutting the long tail from a broad query.
+</ParamField>
+
+<ParamField query="boost" type="string">
+  **`reserved`**
+
+  Multiplies one provider's score without changing the result set: `provider:mega=1.5` brings MEGA rows higher without removing the others. Reserved; may change without notice. Must match the pattern `provider:<name>=<weight>`.
+</ParamField>
+
+<ParamField query="page" type="integer" default="1">
+  **`*` load-bearing · `contract`**
+
+  One-based page number. Combined with `per_page`, the product `page × per_page` must not exceed 10,000; the client raises `DeepPagingError` at that boundary.
+</ParamField>
+
+<ParamField query="per_page" type="integer" default="24">
+  **`*` load-bearing · `contract`**
+
+  Rows per page, capped at 100. The site's own grid uses 24. The client raises `InvalidParameter` for values above 100.
+</ParamField>
+
+<ParamField query="fields" type="string" default="all 17">
+  **`*` load-bearing · `contract`**
+
+  Response projection: a comma-separated list of the row fields to include. Omitting unused fields significantly reduces response size — `fields=id,name,provider,size,url` delivers about a tenth of the bytes of a full row. Valid field names are the 16 base fields plus `preview`:
+
+  `id`, `name`, `provider`, `kind`, `ext`, `size_bytes`, `size`, `files`, `path`, `url`, `hash`, `mirrors`, `score`, `indexed_at`, `checked_at`, `alive`, `preview`
+
+  ```python
+  Query("atlas", fields="id,name,provider,size,ext,files,url")
+  ```
+</ParamField>
+
+<ParamField query="facets" type="string" default="none">
+  **`planned`**
+
+  Requests facet counts from the endpoint. Facets are computed over the entire restricted set before the page window, so `per_page=1` still returns counts for all matching rows. Accepted values: `providers`, `ext`, `size`, `kind`, or `all`.
+
+  ```python
+  Query("climate report", facets="providers,ext")
+  # envelope.provider_counts() → {'mega': 812, 'dropbox': 301, 'gdrive': 170}
+  # envelope.facet("ext")      → {'pdf': 640, 'zip': 233}
+  ```
+</ParamField>
+
+<ParamField query="explain" type="integer" default="0">
+  **`planned`**
+
+  When set to `1`, adds an `explain` object to the envelope containing the parsed terms, filters honoured, filters dropped, and weights applied. The primary tool for verifying that a parameter was honoured. Recipe R10 uses this together with `fields` projection for a finite, auditable answer.
+</ParamField>
+
+<ParamField query="pretty" type="integer" default="0">
+  **`planned`**
+
+  When set to `1`, the endpoint returns indented JSON. For human inspection only; adds payload overhead.
+</ParamField>
+
+<ParamField query="callback" type="string">
+  **`reserved`**
+
+  JSONP wrapper, kept for one legacy internal page. Reserved; assume it will be removed.
+</ParamField>
+
+<ParamField query="cursor" type="string">
+  **`planned`**
+
+  An opaque token replacing `page` past the deep-paging cap. Returned by the endpoint when pagination would exceed 10,000 rows. The `cursor` token allows deeper traversal than `page × per_page` permits.
+</ParamField>
+
+---
+
+## Experimental providers
+
+Eight additional hosts answer through the same `providers` parameter without being documented in the handbook. The client accepts them and emits an advisory note when any are used.
+
+```python
+from meawfy.params import EXPERIMENTAL_PROVIDERS
+
+print(EXPERIMENTAL_PROVIDERS)
+# ('rapidshare', 'pixeldrain', 'filebin', 'gofile',
+#  'catbox', '1fichier', 'uploadhaven', 'krakenfiles')
+```
+
+<Warning>
+Rows from experimental providers differ from documented provider rows in two important ways:
+
+1. **Thinner rows** — fewer of the 17 fields are populated. A filter or sort that reads a missing field has less to work with.
+2. **URL already unlocked** — the `url` field is the direct link, not a share link requiring an unlock step. With MEGA, unlocking is a separate credited step on the site; experimental providers skip that.
+
+The index makes no guarantees about these hosts. Treat a row from one of them as a bonus and pin the date you tested it.
+</Warning>
+
+```python
+from meawfy import Query
+
+# The advice property surfaces a caveat for any experimental host
+q = Query("atlas", providers="pixeldrain")
+print(q.advice[0])
+# "pixeldrain: undocumented host(s) that answer today. Their rows are thinner
+#  than a MEGA row and the url comes back already unlocked, and the index
+#  promises nothing about them staying"
+```
+
+---
+
+## Parameter groups at a glance
+
+The endpoint processes parameters in five stages. Filters decide what is in the result set; `sort` and `order` decide what you see first; shape parameters decide the structure of the response.
+
+```
+1 tokenise   search_query → terms, phrases, negations
+2 restrict   providers · ext · kind · size · files · dates · liveness · dedupe
+             preview · media · metadata · identity · folder
+3 score      weights over name, path, files, mirrors + recency decay
+4 order      the sort key; ties break on score, then size, then name
+5 shape      facets over the restricted set → page window → projection
+```
+
+Groups combine as AND; values inside one parameter combine as OR. `providers=mega,dropbox&ext=pdf,epub` means two drives and two extensions — four possible sets of files, one answer.
+
+<Info>
+`facets` are computed at stage 5, after all filters and before the page window. Requesting `per_page=1&facets=providers` gives the drive breakdown for the entire restricted set, not just for the one returned row. This is the clearest way to tell whether a `providers` filter was actually honoured.
+</Info>

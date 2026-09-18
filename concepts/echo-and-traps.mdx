@@ -1,0 +1,313 @@
+---
+title: "The Echo Mechanism and the Eight Endpoint Traps"
+sidebarTitle: "Echo & Traps"
+description: "How to read the EchoReport to confirm what the endpoint understood, and a complete guide to the eight silent failure modes with client-side remedies."
+---
+
+The Meawfy endpoint answers `200` to almost everything — malformed requests, unknown parameters, invalid enum values, deep pages that exceed the row cap. None of these produce an HTTP error. Each produces a `200` with either a full response or a body-level `error` object. That design makes the `query` echo the most important thing in the envelope, because it is the only record of what the endpoint actually acted on.
+
+## Why the echo matters
+
+The `query` field in every response echoes back what the endpoint understood — never what you sent. A parameter missing from that echo did nothing. A parameter present but with a different value was silently rewritten. On an endpoint that never complains, this is the entire debugging story.
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+query = Query(
+    "periodic table",
+    providers=["mega", "dropbox"],
+    min_size="1mb",
+    sort="size",
+    order="desc",
+)
+envelope = client.search(query)
+
+# What the endpoint understood
+print(envelope.query)
+# {'search_query': 'periodic table', 'providers': ['mega', 'dropbox'],
+#  'sort': 'size', 'order': 'desc'}
+# Notice: min_size is absent — the endpoint may not have honoured it
+```
+
+## Reading an EchoReport
+
+`Envelope.echo_report(query)` compares the envelope's echo against the `Query` you sent and returns an `EchoReport` with three buckets:
+
+- **`honoured`** — the parameter was echoed, and the echo matches what you sent
+- **`changed`** — the parameter was echoed, but the endpoint understood something different
+- **`absent`** — the parameter is not in the echo at all, which means it did nothing
+
+```python
+report = envelope.echo_report(query)
+
+print(report.ok)         # True only when nothing was changed or absent
+print(report.honoured)   # {'search_query': 'periodic table', 'sort': 'size', ...}
+print(report.changed)    # {'providers': ('mega,dropbox', 'mega')} — endpoint dropped dropbox
+print(report.absent)     # ('min_size',) — parameter did nothing
+
+if not report.ok:
+    print(report.summary())
+    # echo confirms 3/5 · changed: providers 'mega,dropbox'->'mega' · absent from echo: min_size
+```
+
+`report.ok` is `True` only when both `changed` and `absent` are empty. `report.summary()` returns a one-line human description of the discrepancy.
+
+<Tip>
+  Make `if not report.ok: print(report.summary())` the first thing you do after every request during development. An endpoint that answers 200 to everything gives you no other signal that something went wrong.
+</Tip>
+
+---
+
+## The eight traps
+
+These are the eight documented ways the endpoint fails without saying so, and what the client does about each one.
+
+### Trap 1: Unknown parameters are silently ignored
+
+The endpoint ignores any query-string name it does not recognise. There is no warning in the response, no count change, and no error. The filter simply is not there.
+
+**What the client does:** `UnknownParameter` is raised before the request is built, with a suggestion of the closest known name. It is a subclass of `InvalidParameter`, so one `except` covers both.
+
+```python
+from meawfy import Query, UnknownParameter, InvalidParameter
+
+try:
+    query = Query("atlas", min_sizee=1_000_000)  # typo: extra 'e'
+except UnknownParameter as exc:
+    print(exc)
+    # unknown parameter(s): min_sizee (closest: min_size)
+
+# Catching either
+try:
+    query = Query("atlas", min_sizee=1_000_000)
+except InvalidParameter as exc:
+    print(f"Bad parameter: {exc.name}")
+```
+
+For names that exist in the vocabulary but that the index has quietly stopped honouring, use `client.verify()`. It sends the request twice — with and without the parameter — and diffs the echo:
+
+```python
+report = client.verify("min_mirrors", 2, "worksheet")
+print(report.verdict)    # "honoured", "rewritten", or "ignored"
+print(report.explain())
+```
+
+---
+
+### Trap 2: A 200 is not a success
+
+A malformed or unsupported request returns `200` with an `error` object in the body and no `results` array. The HTTP status line tells you nothing.
+
+**What the client does:** `client.search()` raises `ResponseError` whenever the body contains an `error` object, regardless of the HTTP status. For callers that prefer to branch rather than catch, `Envelope.ok` is `False` in the same condition.
+
+```python
+from meawfy import MeawfyClient, ResponseError
+
+client = MeawfyClient()
+
+# Using exceptions
+try:
+    envelope = client.search("atlas")
+except ResponseError as exc:
+    print(f"Body-level error: {exc.code} — {exc.message}")
+    # exc.envelope holds the raw Envelope if you need the payload
+
+# Using Envelope.ok
+envelope = client.search("atlas")
+if not envelope.ok:
+    error = envelope.error  # {'code': '...', 'message': '...'}
+    print(f"Error: {error}")
+```
+
+---
+
+### Trap 3: An empty drive looks like a filter that worked
+
+`total: 0` is returned both when no rows match and when the drive you asked for was never indexed. The response is identical. `providers=dropbox` with no matching files and `providers=dropbox` on a never-indexed drive both return an empty `results` array with `total: 0`.
+
+**What the client does:** Request `facets=providers` and call `provider_counts()`. The counts describe the whole restricted set at stage 2, before the page window. They distinguish "no matching rows" from "drive not indexed" because a drive with content in the index will appear with a non-zero count even when the text filter found nothing.
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+query = Query("very obscure query", providers="dropbox", facets="providers")
+envelope = client.search(query)
+
+counts = envelope.provider_counts()
+# Always includes all three documented keys, zeros filled in:
+# {'mega': 0, 'dropbox': 0, 'gdrive': 0}
+
+if counts["dropbox"] == 0:
+    print("Either the query matched nothing, or Dropbox is not indexed")
+    # To distinguish: try without providers filter and check counts again
+```
+
+---
+
+### Trap 4: Case and the `+` character
+
+Enum values sent in the wrong case fall through to the default silently. `sort=Size` is not an error — the endpoint reads it as an unknown value and falls back to `relevance`. The `+` character decodes to a space in a URL query string, so a literal `+` in a search query must be encoded as `%2B`.
+
+**What the client does:** The `Query` class lowercases and validates all enum values before the request goes out, raising `InvalidParameter` on any value that is not in the vocabulary. `query_string()` uses `urllib.parse.quote_plus`, which encodes spaces as `+` and literal `+` as `%2B`.
+
+```python
+from meawfy import Query, InvalidParameter
+
+# This raises before any request is sent
+try:
+    q = Query("atlas", sort="Size")   # capital S
+except InvalidParameter as exc:
+    print(exc)
+    # sort='Size' rejected: expected one of: relevance, size, files, name, ...
+
+# Correct
+q = Query("atlas", sort="size")
+print(q.query_string())
+# search_query=atlas&sort=size
+```
+
+---
+
+### Trap 5: `sort=size` is not a size sort on folders
+
+Folder rows whose total size the indexer could not determine have a `null` `size_bytes`. In a `sort=size` result, those folders sort last in both ascending and descending order — which means the sort is effectively broken for any query that includes folders.
+
+**What the client does:** The `Query` class adds an advisory note to `query.advice` when `sort=size` is used without `kind=file`. This is a warning, not an error — the request goes out, but you are told why the answer may be surprising.
+
+```python
+from meawfy import Query
+
+q = Query("documentary", sort="size", order="desc")
+for note in q.advice:
+    print(note)
+# sort=size: folders with an unknown total sort last in both directions;
+# kind=file is the comparison you probably meant
+
+# Fix it
+q = Query("documentary", sort="size", order="desc", kind="file")
+print(q.advice)  # ()
+```
+
+---
+
+### Trap 6: 120 requests per minute, then a wall
+
+The endpoint enforces a sliding-window rate limit of 120 requests per minute. `X-RateLimit-Remaining` counts down on every response. At zero, the endpoint returns `429 Too Many Requests` with a `Retry-After` header in seconds.
+
+**What the client does:** `RateLimiter` paces requests locally using a sliding window so the wall is rarely reached in the first place. If a `429` does arrive, `Retry-After` is honoured exactly. A `Retry-After` value longer than `max_retry_after` (default 60 s) is treated as a stop signal rather than a wait, and `max_retries` bounds the total number of retry attempts. `client.remaining` exposes the last value seen.
+
+```python
+from meawfy import MeawfyClient, RateLimited
+
+client = MeawfyClient(
+    max_retries=3,        # attempts before giving up on 429/5xx
+    requests_per_minute=60,  # local ceiling, lower than the endpoint's limit
+)
+
+envelope = client.search("atlas")
+print(f"Remaining: {client.remaining}")  # from X-RateLimit-Remaining
+
+# collect() pages automatically, respecting the rate limit
+collection = client.collect("periodic table", providers="mega")
+print(collection.truncated)  # True if the 10,000-row cap was hit
+```
+
+---
+
+### Trap 7: Dead rows vanish after 72 hours
+
+When the liveness checker marks a link dead, the row is kept for 72 hours with `alive=false`. After that, the row is purged from the index permanently — not marked, not archived, and no parameter reaches it. The default filter (`alive=true`) hides dead rows, so a query with no dead-row filter will never see them even within the grace window.
+
+**What the client does:** `client.dead_rows()` builds and executes the correct query for the grace window: `alive=false`, `checked_after` set to 72 hours ago, sorted by check date ascending.
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+
+# All rows detected dead in the last 72 hours
+envelope = client.dead_rows()
+print(f"Dead rows found: {envelope.total}")
+
+for row in envelope.results:
+    print(row.id, row.url, row.checked_at)
+
+# You can narrow the window or override any parameter
+envelope = client.dead_rows(within_hours=24, providers="mega")
+```
+
+<Warning>
+  Once the 72-hour window closes, the row is gone. There is no parameter that retrieves a purged row. `dead_rows()` only helps if you run it inside the window.
+</Warning>
+
+---
+
+### Trap 8: Paging stops at 10,000 rows
+
+The endpoint caps `page × per_page` at 10,000. Above that limit it keeps answering — but the page it returns is the cap page, not the page you asked for. So page 200 with `per_page=100` does not raise an error; it silently returns the same rows as page 100.
+
+**What the client does:** `Query` raises `DeepPagingError` (a subclass of `InvalidParameter`) before the request goes out whenever `page × per_page > 10,000`. `collect()` walks pages up to the cap and sets `truncated=True` on the returned `Collection` when the total exceeds the window.
+
+```python
+from meawfy import Query, DeepPagingError, MeawfyClient, Collection
+
+# Caught before any network call
+try:
+    q = Query("atlas", page=200, per_page=100)  # 200 × 100 = 20,000 > 10,000
+except DeepPagingError as exc:
+    print(exc)
+    # page=200 rejected: page x per_page = 20000 leaves the reachable window of 10000
+
+# collect() handles this gracefully
+client = MeawfyClient()
+collection: Collection = client.collect("periodic table", providers="mega")
+
+if collection.truncated:
+    print(f"Result set has {collection.total} rows, but only {len(collection.rows)} are reachable")
+    print(collection.advice)
+    # Narrow the filters to get under the 10,000-row cap
+```
+
+The right answer to a result set larger than 10,000 rows is always to narrow the filters — not to try to page deeper. Use `facets`, `ext`, `min_size`, `after`, or `providers` to split the set into windows that fit.
+
+---
+
+## Error class hierarchy
+
+All errors from this package inherit from `MeawfyError`. The hierarchy mirrors the handbook's failure taxonomy:
+
+```text
+MeawfyError
+├── InvalidParameter       — bad value, before the request goes out
+│   ├── UnknownParameter   — name not in the 50-parameter vocabulary (trap 1)
+│   └── DeepPagingError    — page × per_page > 10,000 (trap 8)
+├── ResponseError          — body-level error under HTTP 200 (trap 2)
+└── TransportError         — no JSON body: HTTP error, DNS, TLS, timeout
+    └── RateLimited        — 429 Too Many Requests (trap 6)
+```
+
+```python
+from meawfy import (
+    MeawfyError,
+    InvalidParameter,
+    UnknownParameter,
+    DeepPagingError,
+    ResponseError,
+    TransportError,
+    RateLimited,
+)
+
+# Catch everything this package raises
+try:
+    envelope = client.search(query)
+except MeawfyError as exc:
+    print(type(exc).__name__, exc)
+
+# Catch only pre-flight validation errors
+try:
+    query = Query("atlas", **user_params)
+except InvalidParameter as exc:
+    print(f"Invalid: {exc.name} = {exc.value!r} — {exc.reason}")
+```

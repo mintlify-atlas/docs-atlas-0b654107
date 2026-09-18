@@ -1,0 +1,216 @@
+---
+title: "The Meawfy Endpoint: URL, Providers, and Response"
+sidebarTitle: "The Endpoint"
+description: "Everything the Meawfy results endpoint accepts and returns — URL, auth, envelope structure, result fields, rate-limit headers, and the 50 parameters."
+---
+
+The Meawfy file-search endpoint is a single URL. There is no authentication, no version in the path, and no install step — `urllib` is the only transport the client needs. What makes it worth understanding in detail is the opposite of what is missing: 50 parameters, three documented providers plus eight undocumented ones, and a response envelope that tells you what the endpoint actually understood before you look at a single row.
+
+## URL and authentication
+
+The endpoint accepts only GET requests. There is no API key, no OAuth, and no session cookie.
+
+| | |
+|---|---|
+| **Method** | `GET` |
+| **URL** | `https://meawfy.com/internal/api/results.json` |
+| **Auth** | None |
+| **Versioning** | None — the path never changes, and nothing announces a renamed parameter |
+| **Latency** | 20–80 ms observed; the actual time is reported in `took_ms` |
+
+The endpoint is internal and unversioned. The only defence the handbook offers is to pin the date you last tested it and record a response fixture to compare against later.
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+query = Query("periodic table", providers=["mega", "dropbox"], sort="size", order="desc")
+envelope = client.search(query)
+```
+
+## Documented providers
+
+The index covers three cloud-storage drives. Each is passed as a value to the `providers` parameter.
+
+<CardGroup cols={3}>
+  <Card title="mega" icon="cloud">
+    MEGA cloud storage. Rows are the most complete of any provider — all 16 base fields are typically populated. Unlocking a MEGA link is a separate, credited step on the site and is deliberately not part of this call.
+  </Card>
+  <Card title="dropbox" icon="cloud">
+    Dropbox shared links, indexed by name, size, folder structure, and content hash where the indexer could extract one.
+  </Card>
+  <Card title="gdrive" icon="cloud">
+    Google Drive shared links, indexed the same way as Dropbox. The `url` field holds the public share link.
+  </Card>
+</CardGroup>
+
+All three are present by default. To restrict to one drive, send `providers=mega` or pass a list: `providers=["mega", "dropbox"]`. Filtering to a drive that was never indexed and filtering to a drive that has no matching rows both return `total: 0` — use `facets=providers` and `provider_counts()` to tell them apart.
+
+```python
+from meawfy import PROVIDERS  # ("mega", "dropbox", "gdrive")
+```
+
+## Experimental providers
+
+The index also answers for eight hosts it never documents. They go through the same `providers` parameter and are listed in `EXPERIMENTAL_PROVIDERS`.
+
+```python
+from meawfy import EXPERIMENTAL_PROVIDERS
+# ("rapidshare", "pixeldrain", "filebin", "gofile",
+#  "catbox", "1fichier", "uploadhaven", "krakenfiles")
+
+from meawfy import KNOWN_PROVIDERS
+# ("mega", "dropbox", "gdrive") + the eight above, in that order
+```
+
+<Warning>
+  These eight hosts answer today, in testing. No page on the site announces them and no note dates them. Whether they will still answer next month is unknown. Treat a row from one of them as a bonus, and pin the date you tested it.
+</Warning>
+
+Two things differ from the documented drives:
+
+1. **Thinner rows.** A MEGA row is far more complete. What these carry of the 17 fields is less, and a filter or sort that reads a missing field has less to work with.
+2. **The `url` is already unlocked.** With MEGA, unlocking is a separate credited step on the site. For experimental providers, the `url` field holds the link itself — nothing here has to unlock it.
+
+`Result.from_experimental_provider` is `True` on any row from one of these hosts. The `Query` class will add an advisory note to `query.advice` when an experimental provider name is used:
+
+```python
+from meawfy import Query
+
+query = Query("atlas", providers="pixeldrain")
+for note in query.advice:
+    print(note)
+# pixeldrain: undocumented host(s) that answer today. Their rows are thinner
+# than a MEGA row and the url comes back already unlocked, and the index
+# promises nothing about them staying
+```
+
+## The envelope
+
+Every response is a JSON object. The reading order is `query` → `warnings` → `results`.
+
+```json
+{
+  "query": {
+    "search_query": "periodic table",
+    "providers": ["mega", "dropbox"],
+    "sort": "size",
+    "order": "desc"
+  },
+  "facets": {
+    "providers": { "mega": 812 },
+    "ext": { "pdf": 640 }
+  },
+  "warnings": [],
+  "total": 1283,
+  "page": 1,
+  "per_page": 50,
+  "pages": 26,
+  "took_ms": 42,
+  "results": [
+    { "...": "one row — up to 17 fields" }
+  ]
+}
+```
+
+<Note>
+  `query` echoes what the endpoint **understood**, never what you sent. A parameter missing from that echo did nothing. On an endpoint that answers `200` to everything, the echo is the whole debugging story. See [Echo and Traps](/concepts/echo-and-traps) for how to read it.
+</Note>
+
+| Field | Type | What it holds |
+|---|---|---|
+| `query` | object | The endpoint's echo of your request parameters |
+| `facets` | object | Count breakdowns over the full restricted set, when `facets=` was sent |
+| `warnings` | array | Advisory strings from the index — read these before reading rows |
+| `total` | integer | Total rows matching the filter, not just the current page |
+| `page` | integer | The current page number (one-based) |
+| `per_page` | integer | Rows per page (default 24, max 100) |
+| `pages` | integer | Total number of pages at the current `per_page` setting |
+| `took_ms` | integer | Server-side processing time in milliseconds |
+| `results` | array | The current page of rows, each with up to 17 fields |
+
+## The 17 result fields
+
+Each row in `results` carries up to 17 fields: 16 base fields, plus a `preview` object that appears only when `preview=1` is sent and a thumbnail exists.
+
+| Field | Type | What it holds | Why it matters |
+|---|---|---|---|
+| `id` | string | Provider-prefixed stable identifier: `mega:4f2a…` | Dedupe and diff on this, never on a name |
+| `name` | string | Filename or folder name, case intact as published | The first field a query matches |
+| `provider` | enum | `mega` · `dropbox` · `gdrive` (or an experimental host) | The only field `providers` reads |
+| `kind` | enum | `file` · `folder` | Folders carry files; files carry bytes |
+| `ext` | string | Lowercase extension, no dot | The endpoint's answer to `filetype:` |
+| `size_bytes` | integer | File or folder size in bytes, nullable | Null on a folder nobody managed to total; sort on this, not on `size` |
+| `size` | string | Human-readable form: `"1.4 GB"` | Display only — never sort or compare on this string |
+| `files` | integer | Number of files inside a folder row, null on a file | The field that `min_files` and `sort=files` reads |
+| `path` | string | The folder path as published by the provider | Depth is the tell for a real collection |
+| `url` | string | The public share URL | For documented drives, unlocking is the site's job; for experimental providers, the link is already the destination |
+| `hash` | string | Content hash, where known | What `dedupe` collapses on, and the key for a diff (R12) |
+| `mirrors` | integer | Count of other rows sharing the same hash | A survival signal, not a quality signal |
+| `score` | float | Relevance score, 0–1 | Comparable only within a single query; meaningless across two |
+| `indexed_at` | date | When the indexer first saw this row | The field `after` and `before` filter on |
+| `checked_at` | date | When the indexer last checked liveness | Freshness of the check, not of the file |
+| `alive` | boolean | `false` once a link is known dead | The default filter hides dead rows; `alive=false` surfaces them within the 72-hour grace window |
+| `preview` | object | `{ "url", "width", "height", "mime" }` when `preview=1` found a thumbnail; `null` otherwise | Low-res thumbnail for renderable content; `null` on documents, folders, and rows without an extractable frame |
+
+Fields are reachable by attribute (`row.name`) or by key (`row["name"]`). Use the `fields` parameter to project only what you need:
+
+```python
+from meawfy import MeawfyClient, Query
+
+client = MeawfyClient()
+# A real client renders four fields at a tenth of the bytes
+query = Query("periodic table", fields="id,name,provider,size,url")
+envelope = client.search(query)
+
+for row in envelope.results:
+    print(row.id, row.name, row.human_size, row.url)
+```
+
+## Response headers
+
+<CardGroup cols={2}>
+  <Card title="X-RateLimit-Remaining" icon="gauge">
+    Present on every response. Counts down from the 120-request-per-minute budget. Read this before deciding whether to make the next call. Available at `client.remaining` after any request.
+  </Card>
+  <Card title="Retry-After" icon="clock">
+    Present only on a `429` response. Specifies how many seconds to wait before retrying. The client honours this automatically; a value longer than `max_retry_after` (60 s) is treated as a stop signal rather than a wait.
+  </Card>
+</CardGroup>
+
+```python
+client = MeawfyClient()
+envelope = client.search("periodic table")
+print(f"Remaining budget: {client.remaining} requests")
+```
+
+The rate limit is 120 requests per minute, shared with the site's own front end. A `429` means the endpoint wants you to stop, not to retry harder.
+
+## The 50 parameters: statuses
+
+Every parameter carries one of three status values. Status is a claim about what the vendor's index does today — it is not a promise.
+
+| Status | Meaning |
+|---|---|
+| `contract` | The index answers it today and the site's own front end depends on it. These seven names are the load-bearing set: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`. |
+| `planned` | Specified in the handbook and not yet exercised by a client. The index may or may not honour it; read the echo to confirm. |
+| `reserved` | A name kept free for a future purpose. Sending it changes nothing, and the silence says nothing about why. |
+
+<Tip>
+  Use `python3 -m meawfy params --status contract` to print all contract-status parameters, or `--load-bearing` to list only the seven that the front end reads on every page load.
+</Tip>
+
+Parameters with `planned` or `reserved` status may move without notice. The `explain=1` parameter plus a pinned test date is the best available defence, which is what the `verify` command and `record` command are for.
+
+```python
+from meawfy import PARAMS, LOAD_BEARING
+
+# The seven load-bearing names
+print(LOAD_BEARING)
+# frozenset({'search_query', 'providers', 'sort', 'order', 'page', 'per_page', 'fields'})
+
+# Check the status of any parameter
+print(PARAMS["weights"].status)   # "planned"
+print(PARAMS["sort"].status)      # "contract"
+print(PARAMS["parent"].status)    # "reserved"
+```

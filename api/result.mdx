@@ -1,0 +1,304 @@
+---
+title: "Result and Preview — Row and Thumbnail Objects"
+sidebarTitle: "Result"
+description: "Result wraps one index row. All 17 fields are accessible by attribute or key, with computed properties for human size, dates, dedupe key, and Preview."
+---
+
+Each item inside `envelope.results` is a `Result` object. It wraps a single row from the endpoint's JSON array and gives you typed access to all 17 fields — either by attribute (`row.name`) or by key (`row["name"]`). A `Preview` dataclass is nested inside any row where the endpoint returned thumbnail metadata.
+
+## The 17 Fields
+
+The endpoint returns up to 17 fields per row: 16 base fields that are always present (though individual values may be `null`), plus a `preview` object that is only populated when `preview=1` was sent and the endpoint found a renderable thumbnail.
+
+When you send a `fields=` projection, fields not listed are simply absent from the row. Accessing an absent field raises `AttributeError` with a message that names the field:
+
+```
+AttributeError: row has no field 'hash' (projected out, or never returned)
+```
+
+Use `row.get("hash")` or `"hash" in row` to access fields safely when the projection is not known statically.
+
+### Field Reference
+
+| Field | Type | Description | Notes |
+|---|---|---|---|
+| `id` | `str` | Provider-prefixed stable identifier, e.g. `mega:4f2a1b` | Use for deduplication and diff operations — never use `name` for identity |
+| `name` | `str` | Filename or folder name, case intact as published | The first field the search tokeniser matches against |
+| `provider` | `str` | Source drive: `mega`, `dropbox`, or `gdrive` | The only field the `providers` parameter reads |
+| `kind` | `str` | `"file"` or `"folder"` | Folders carry `files`; files carry `size_bytes` |
+| `ext` | `str` | Lowercase extension without dot, e.g. `pdf` | The field `ext=` filters on |
+| `size_bytes` | `int \| None` | Raw byte count | `null` on folders where the indexer could not total the contents |
+| `size` | `str \| None` | Human-readable form, e.g. `"1.4 GB"` | Display only — sort on `size_bytes`, not this |
+| `files` | `int \| None` | Number of files inside a folder row | `null` on file rows; the field `min_files` reads |
+| `path` | `str \| None` | Folder path as published, e.g. `/Chemistry/Reference` | Depth is the tell for a real collection |
+| `url` | `str` | Public share URL | Unlocking is the site's own step — not part of this call |
+| `hash` | `str \| None` | Content hash where known, e.g. `sha1:a3b4c5d6...` | What `dedupe` collapses on |
+| `mirrors` | `int \| None` | Count of other rows with the same content hash | A survival signal, not a quality one |
+| `score` | `float \| None` | Relevance score, 0–1 | Meaningful only within a single query; do not compare across queries |
+| `indexed_at` | `str \| None` | ISO date of first indexing, e.g. `"2024-03-15"` | The day the indexer saw it, not the day the file was created |
+| `checked_at` | `str \| None` | ISO date of last liveness check | Freshness of the check, not of the file content |
+| `alive` | `bool \| None` | `False` once a dead link is detected | Default filter is `alive=true`; dead rows are purged after 72 hours |
+| `preview` | `dict \| None` | Raw preview object from the endpoint | Use the `.preview` property to get a typed `Preview` instance |
+
+## Accessing Fields
+
+```python
+# By attribute
+print(row.name)
+print(row.size_bytes)
+
+# By key — identical result
+print(row["name"])
+print(row["size_bytes"])
+
+# Safe access with a default
+print(row.get("hash", "no hash"))
+
+# Membership check
+if "preview" in row:
+    print("preview field is present (may still be null)")
+
+# Iterate field names
+for field_name in row:
+    print(field_name, row[field_name])
+```
+
+## Computed Properties
+
+These properties are deliberately not stored as fields — they are derived from the raw data and do not appear in the JSON:
+
+### `is_folder` / `is_file`
+
+```python
+row.is_folder  # bool — True when kind == "folder"
+row.is_file    # bool — True when kind == "file"
+```
+
+### `human_size`
+
+```python
+row.human_size  # str
+```
+
+The `size` string as printed by the endpoint, or one derived from `size_bytes` using the same unit formatting (`4.5 MB`, `1.2 GB`, etc.). Returns `"—"` when both fields are absent.
+
+```python
+# These produce the same output
+print(row.size)        # "4.5 MB"  (the endpoint's string, if present)
+print(row.human_size)  # "4.5 MB"  (falls back to size_bytes if size is absent)
+```
+
+### `size_bytes_or_none`
+
+```python
+row.size_bytes_or_none  # int | None
+```
+
+Returns `size_bytes` as an integer, or `None` if the field is absent, `null`, or non-numeric. Safer than casting `row.size_bytes` directly when the field may be projected out.
+
+### `dedupe_key`
+
+```python
+row.dedupe_key  # str
+```
+
+The key the `dedupe` parameter collapses on, and the key to use when comparing rows across drives with `diff()`. Prefers `hash`; falls back to `id` when `hash` is absent; returns an empty string when both are absent.
+
+```python
+# Group rows by deduplicated content
+from collections import defaultdict
+groups = defaultdict(list)
+for row in envelope.results:
+    groups[row.dedupe_key].append(row)
+```
+
+### `preview`
+
+```python
+row.preview  # Preview | None
+```
+
+Returns a typed `Preview` instance when the `preview` field is a dict with a `url`, or `None` otherwise. The field is always `None` unless `preview=1` was sent.
+
+```python
+envelope = client.search("documentary", ext="mp4", preview=1)
+for row in envelope:
+    if row.preview:
+        print(row.preview.url, row.preview.size)  # e.g. "256x144"
+```
+
+### `from_experimental_provider`
+
+```python
+row.from_experimental_provider  # bool
+```
+
+`True` when the row comes from one of the eight undocumented providers (`rapidshare`, `pixeldrain`, `filebin`, `gofile`, `catbox`, `1fichier`, `uploadhaven`, `krakenfiles`). These rows carry fewer fields than a MEGA row, and their `url` is already the direct link — no separate unlock step is needed.
+
+```python
+for row in envelope.results:
+    if row.from_experimental_provider:
+        print(f"{row.provider}: direct link — {row.url}")
+    else:
+        print(f"{row.provider}: unlock required")
+```
+
+### `indexed_date` / `checked_date`
+
+```python
+row.indexed_date  # date | None
+row.checked_date  # date | None
+```
+
+`indexed_at` and `checked_at` parsed into Python `datetime.date` objects. Returns `None` when the field is absent or unparseable. Useful for arithmetic without string manipulation:
+
+```python
+from datetime import date, timedelta
+
+cutoff = date.today() - timedelta(days=30)
+recent = [row for row in envelope.results if row.indexed_date and row.indexed_date >= cutoff]
+```
+
+## Methods
+
+### `cell(field) → str`
+
+Renders one field as a plain-text string for terminal table display. Handles `None` as `"·"`, booleans as `"yes"`/`"no"`, floats to two decimal places, `preview` as `"256x144 image/jpeg"`, and `size_bytes` as a human size. Returns `"·"` for any field not present in the row (projected out or never returned).
+
+```python
+# Build a terminal table
+columns = ["name", "provider", "size", "alive"]
+for row in envelope.results:
+    print("  ".join(row.cell(col) for col in columns))
+```
+
+### `to_dict() → dict[str, Any]`
+
+Returns a plain dict copy of the row's data. Only the fields actually present in the row (per projection) are included.
+
+```python
+import json
+print(json.dumps(row.to_dict(), indent=2))
+```
+
+### `get(item, default=None)`
+
+Dict-style `.get()` with an optional default. Does not raise `AttributeError` for absent fields.
+
+```python
+hash_val = row.get("hash")             # None if absent
+score = row.get("score", 0.0)          # 0.0 if projected out
+```
+
+### `keys()`
+
+Returns a tuple of field names present in the row.
+
+```python
+print(row.keys())
+# ('id', 'name', 'provider', 'size', 'url')  -- with a narrow fields= projection
+```
+
+## The `Preview` Dataclass
+
+`Preview` is a frozen dataclass holding thumbnail metadata. It is only populated when `preview=1` is sent and the endpoint found a renderable thumbnail for the row. Documents, most folders, and rows without an extractable frame return `null`.
+
+```python
+from meawfy.models import Preview
+
+@dataclass(frozen=True)
+class Preview:
+    url: str
+    width: int | None = None
+    height: int | None = None
+    mime: str | None = None
+```
+
+<ResponseField name="url" type="str" required>
+  CDN URL of the thumbnail. The resolution served depends on the `preview_size` parameter sent in the request (`tiny` 64 px, `small` 128 px, `medium` 256 px, `large` 512 px).
+</ResponseField>
+
+<ResponseField name="width" type="int">
+  Pixel width of the thumbnail. `None` if the endpoint did not return it.
+</ResponseField>
+
+<ResponseField name="height" type="int">
+  Pixel height of the thumbnail. `None` if the endpoint did not return it.
+</ResponseField>
+
+<ResponseField name="mime" type="str">
+  MIME type of the thumbnail image, e.g. `"image/jpeg"`. `None` if not returned.
+</ResponseField>
+
+### `Preview.size` property
+
+```python
+preview.size  # str — e.g. "256x144" or "?"
+```
+
+Returns `"{width}x{height}"` when both dimensions are present, or `"?"` otherwise.
+
+```python
+# Accessing preview data
+envelope = client.search(
+    "documentary",
+    ext="mp4",
+    preview=1,
+    preview_size="large",   # 512px thumbnails
+    sort="size",
+    order="desc",
+)
+for row in envelope.results:
+    p = row.preview
+    if p is not None:
+        print(f"{row.name}: {p.url}  ({p.size} {p.mime})")
+```
+
+## Projection
+
+When you send `fields=id,name,provider,size,url`, only those five fields are present in each `Result`. Accessing any other field raises `AttributeError`:
+
+```python
+envelope = client.search("atlas", fields="id,name,provider,size,url")
+row = envelope.results[0]
+
+print(row.name)    # works
+print(row.size)    # works
+
+print(row.hash)
+# AttributeError: row has no field 'hash' (projected out, or never returned)
+
+# Safe pattern
+if "hash" in row:
+    print(row.hash)
+```
+
+<Tip>
+A narrow projection is the single most effective bandwidth optimisation. `fields=id,name,provider,size,url` is roughly a tenth of the bytes of the full 17-field row, and the endpoint generates the projection server-side.
+</Tip>
+
+## Complete Example
+
+```python
+from meawfy import MeawfyClient
+
+client = MeawfyClient()
+envelope = client.search(
+    "periodic table",
+    providers=["mega", "dropbox"],
+    max_size="50mb",
+    sort="size",
+    order="desc",
+    fields="id,name,provider,kind,size_bytes,size,url,hash,alive,indexed_at",
+    per_page=25,
+)
+
+for row in envelope:
+    # Access fields by attribute
+    print(f"{row.name} ({row.provider})")
+    print(f"  kind:    {row.kind} — is_file={row.is_file}")
+    print(f"  size:    {row.human_size}")
+    print(f"  alive:   {row.cell('alive')}")
+    print(f"  indexed: {row.indexed_date}")
+    print(f"  key:     {row.dedupe_key}")
+```
