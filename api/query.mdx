@@ -157,7 +157,7 @@ while True:
 def advice(self) -> tuple[str, ...]
 ```
 
-A tuple of advisory strings describing parameter combinations that are valid but likely to mislead. Advice is computed once at construction time. An empty tuple means the parameter set has no known traps.
+A tuple of advisory strings (not a list) describing parameter combinations that are valid but likely to mislead. Advice is computed once at construction time. An empty tuple means the parameter set has no known traps.
 
 ```python
 from meawfy import Query
@@ -199,13 +199,13 @@ The advice system fires on these conditions:
 
 </Accordion>
 
-### `echo_report(envelope)`
+### `echo_report(echo)`
 
 ```python
 def echo_report(self, echo: Mapping[str, Any]) -> EchoReport
 ```
 
-A convenience wrapper around `EchoReport.from_pairs()`. Compares the query's sent values against what the endpoint echoed back in the response body. On an endpoint that answers `200` to everything, the echo is the primary debugging signal: a parameter missing from it did nothing.
+A convenience wrapper around `EchoReport.from_pairs()`. Accepts any `Mapping[str, Any]` — typically `envelope.query`, the dict the endpoint echoed back. Compares the query's sent values against the echoed values. On an endpoint that answers `200` to everything, the echo is the primary debugging signal: a parameter missing from it did nothing.
 
 ```python
 from meawfy import MeawfyClient, Query
@@ -228,7 +228,7 @@ print(report.summary())
 
 ```python
 @classmethod
-def coerce(cls, value: Query | Mapping[str, Any] | None, **params: Any) -> Query
+def coerce(cls, value: Query | Mapping[str, Any] | str | None, **params: Any) -> Query
 ```
 
 A factory that accepts a `Query`, a mapping, a string, or `None`, plus optional keyword overrides. Useful when a helper function should accept whatever the caller has at hand.
@@ -297,8 +297,7 @@ Passing a `Query` together with extra keyword arguments raises `InvalidParameter
 </CardGroup>
 
 ```python
-from meawfy import Query
-from meawfy.errors import InvalidParameter, UnknownParameter, DeepPagingError
+from meawfy import Query, InvalidParameter, UnknownParameter, DeepPagingError
 
 try:
     Query("atlas", sort="Size")          # wrong case

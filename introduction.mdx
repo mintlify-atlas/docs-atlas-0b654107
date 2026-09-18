@@ -40,13 +40,13 @@ Every one of these trap scenarios returns HTTP `200`. Without a dedicated client
 
 | Trap | The endpoint's behaviour | The client's response |
 |---|---|---|
-| **Unknown parameter ignored** | `200`, no warning, no effect — the filter is simply absent | `UnknownParameter` raised before the request is built; closest known name included in the error message |
+| **Unknown parameter ignored** | `200`, no warning, no effect — the filter is simply absent | `UnknownParameter` raised before the request is built; closest known name included in the error message. `verify()` covers the other case: a name that exists but that the index stopped honouring |
 | **200 is not success** | A malformed request returns `200` with an `error` object and no `results` | `ResponseError` on any body-level `error`; `Envelope.ok` for callers that prefer to branch |
 | **Empty drive looks like a working filter** | `total: 0` is indistinguishable from a drive that was never indexed | `facets=providers` and `envelope.provider_counts()` expose the per-drive count, not just the total |
 | **Case and encoding issues** | `sort=Size` falls through to relevance; `+` in a query string decodes to a space | Enum values are lowercased and validated before the request is sent; `quote_plus` encodes spaces as `+` and literal `+` as `%2B` |
 | **`sort=size` on folders** | Folders with an unknown total sort last in both directions, regardless of sort direction | A note in `Query.advice` pointing at `kind=file` as the safer alternative |
 | **Rate limit wall** | `X-RateLimit-Remaining` counts down; `429` at zero; `Retry-After` in seconds | Sliding-window local pacing; `Retry-After` honoured; retries bounded by `max_retries`; `client.remaining` exposed |
-| **Dead rows vanish after 72 hours** | Purged, not archived — no parameter can reach them after the grace period | `dead_rows()` builds the detection window; `DeepPagingError` is not applicable here, but the 72-hour limit is a first-class cap |
+| **Dead rows vanish after 72 hours** | Purged, not archived — no parameter can reach them after the grace period | `dead_rows()` builds the window and the fields; the purge itself has no workaround |
 | **Paging stops at 10,000 rows** | Keeps answering with the cap applied, so a deeper page is misleading rather than empty | `DeepPagingError` raised before the request; `collect()` stops at the window and sets `Collection.truncated` |
 
 <Note>

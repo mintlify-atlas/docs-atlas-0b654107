@@ -1,5 +1,5 @@
 ---
-title: "CLI Command Reference — All Meawfy Commands"
+title: "Meawfy CLI Commands — Full Flag and Example Reference"
 sidebarTitle: "Commands"
 description: "Complete flag reference for every meawfy CLI command: search, url, params, recipes, recipe, verify, diff, dead, and record — with examples for each."
 ---
@@ -287,7 +287,7 @@ python3 -m meawfy recipe R13 --set search_query="python course"
 
 ---
 
-<Accordion title="verify NAME VALUE QUERY — did the index honour this parameter?">
+<Accordion title="verify NAME VALUE — did the index honour this parameter?">
 
 Send the same query twice — once with the named parameter set to `VALUE`, and once without it — then compare the echo objects returned by the endpoint. If the `query` echo changed between the two calls, the parameter was honoured. If the echo and the result counts are identical, the parameter had no effect and the command exits with code 5.
 
@@ -413,8 +413,7 @@ python3 -m meawfy dead [--within-hours N] [--columns LIST] [global options]
 
 **Exit codes**
 
-- `0` — the command completed (even if the result set is empty)
-- `4` — no dead rows were found in the window
+- `0` — the command always exits with `0`; an empty result set is not an error
 
 **Examples**
 

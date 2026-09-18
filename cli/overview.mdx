@@ -1,5 +1,5 @@
 ---
-title: "CLI Overview — Meawfy Command-Line Interface"
+title: "Meawfy CLI Overview — Commands, Options, and Exit Codes"
 sidebarTitle: "CLI Overview"
 description: "Run searches, inspect parameters, execute recipes, and verify endpoint behaviour from your terminal with python -m meawfy — no installation required."
 ---
@@ -121,7 +121,7 @@ Scripts can branch on the exit code to distinguish success from different catego
 |---|---|
 | `0` | Success. The command completed normally. |
 | `2` | A `MeawfyError` was raised: an invalid parameter, a body-level error from the endpoint, or a transport failure. The error message is printed to stderr. |
-| `4` | No rows. Returned by `dead` always, and by `search --fail-on-empty` when the result set is empty. |
+| `4` | No rows. Returned by `search --fail-on-empty` when the result set is empty. |
 | `5` | `verify`: the index did not honour the tested parameter. The name was sent and acknowledged in the echo, but the result set did not change. |
 | `130` | Interrupted. A `KeyboardInterrupt` was caught (Ctrl-C). |
 

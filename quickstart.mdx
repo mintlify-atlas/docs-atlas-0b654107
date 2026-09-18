@@ -35,13 +35,13 @@ You should see the full command listing. If you are working from a parent direct
 PYTHONPATH=/path/to/meawfy-client python3 -m meawfy --help
 ```
 
-To confirm the parameter registry is intact, list the seven load-bearing parameters:
+To confirm the parameter registry is intact, list the load-bearing parameters:
 
 ```bash
-python3 -m meawfy params --status contract
+python3 -m meawfy params --load-bearing
 ```
 
-This runs no network requests. A successful listing confirms the package is importable and the registry passes its internal assertions.
+This runs no network requests. A successful listing confirms the package is importable and the registry passes its internal assertions. The expected output is the seven names the front end depends on: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`.
 
 </Step>
 
@@ -164,6 +164,8 @@ try:
     envelope = client.search("worksheet", max_size="400mb", per_page=50)
 except UnknownParameter as exc:
     print(f"bad parameter name: {exc}")
+except DeepPagingError as exc:
+    print(f"page window exceeded: {exc}")
 except InvalidParameter as exc:
     print(f"bad value for {exc.name}: {exc.reason}")
 except ResponseError as exc:
@@ -175,6 +177,16 @@ except TransportError as exc:
 ```
 
 The client handles retries internally. A `429` waits out `Retry-After`. A `5xx` or dropped connection backs off exponentially with jitter. A `RateLimited` exception only surfaces once `max_retries` (default 3) is exhausted.
+
+**CLI exit codes** — when running `python3 -m meawfy search`:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success — at least one row returned |
+| `2` | A `MeawfyError` — invalid parameter, body-level error, or transport failure |
+| `4` | No rows — `total: 0` or `--fail-on-empty` set explicitly |
+| `5` | `verify`: the index did not honour the parameter |
+| `130` | Interrupted (Ctrl-C) |
 
 </Step>
 

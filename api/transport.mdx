@@ -1,7 +1,7 @@
 ---
-title: "Transport Layer — HTTP, Replay, and Rate Limiting"
+title: "Meawfy Transport Layer — HTTP, Replay, and Rate Limiting"
 sidebarTitle: "Transport"
-description: "Reference for the Transport type alias, TransportResponse, urllib_transport, replay_transport, resolve_base_url, and RateLimiter with custom transport examples."
+description: "Reference for Transport, TransportResponse, urllib_transport, replay_transport, resolve_base_url, RateLimiter, and custom transport injection examples."
 ---
 
 The transport layer separates the concern of making an HTTP request from the concern of interpreting the response. `MeawfyClient` calls a single callable of type `Transport` — any function that takes a URL string and returns a `TransportResponse`. The default implementation uses Python's `urllib`, but you can swap it for a replay fixture, a mock, or a wrapper around any HTTP library without touching the client logic.
@@ -14,6 +14,23 @@ client = MeawfyClient()
 
 # Replay transport: every request gets the same recorded response
 client = MeawfyClient(transport=replay_transport("fixtures/results.json"))
+```
+
+---
+
+## `DEFAULT_BASE_URL`
+
+```python
+DEFAULT_BASE_URL = "https://meawfy.com/internal/api/results.json"
+```
+
+The canonical production endpoint URL. Used as the fallback when neither `base_url` nor the `MEAWFY_BASE_URL` environment variable is set. Import it directly if you need to compare or log the default:
+
+```python
+from meawfy import DEFAULT_BASE_URL
+
+print(DEFAULT_BASE_URL)
+# https://meawfy.com/internal/api/results.json
 ```
 
 ---
@@ -189,7 +206,7 @@ resolve_base_url(None)
 class RateLimiter:
     def __init__(
         self,
-        limit: int = 120,
+        limit: int = CAPS["requests_per_minute"],
         window: float = 60.0,
         *,
         clock: Callable[[], float] = time.monotonic,
@@ -201,8 +218,8 @@ A sliding-window throttle that paces outgoing requests so the documented 120-req
 
 The limiter tracks a deque of timestamps for the last `limit` requests in the last `window` seconds. When the window is full, `acquire()` sleeps until the oldest timestamp ages out. When the endpoint returns a 429, the client calls `block()` with the `Retry-After` value, which sets a hard floor below which no new request can start.
 
-<ParamField path="limit" type="int" default="120">
-  Maximum requests in one `window`. The default is the endpoint's documented limit.
+<ParamField path="limit" type="int" default="CAPS['requests_per_minute'] (120)">
+  Maximum requests in one `window`. Defaults to `CAPS['requests_per_minute']` (120), which matches the endpoint's documented rate limit. Override via the `requests_per_minute` argument on `MeawfyClient`, or set `MEAWFY_RATE_LIMIT` in the environment.
 </ParamField>
 
 <ParamField path="window" type="float" default="60.0">
@@ -366,12 +383,13 @@ print(f"waits: {waited}")  # [0.5, 5.0]
 
 ## Environment variables
 
-The transport layer reads three environment variables during construction:
+The transport layer reads four environment variables during construction:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MEAWFY_BASE_URL` | The endpoint URL (passed through `resolve_base_url`) | `https://meawfy.com/internal/api/results.json` |
 | `MEAWFY_TIMEOUT` | Per-request socket timeout in seconds | `15` |
+| `MEAWFY_RATE_LIMIT` | Sliding-window rate-limit ceiling for `RateLimiter` | `120` (`CAPS["requests_per_minute"]`) |
 | `MEAWFY_FIXTURE` | Path to a JSON file served by `replay_transport` instead of making live requests | unset |
 
 <Info>

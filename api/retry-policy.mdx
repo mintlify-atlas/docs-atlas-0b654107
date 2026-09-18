@@ -1,7 +1,7 @@
 ---
 title: "RetryPolicy — Retry Behaviour for the Meawfy Client"
 sidebarTitle: "RetryPolicy"
-description: "Reference for the RetryPolicy dataclass: all fields, backoff formula, Retry-After handling, deadline bounds, and code examples for aggressive and fast-fail policies."
+description: "Reference for RetryPolicy: fields, backoff formula, Retry-After handling, deadline bounds, and code examples for aggressive, fast-fail, and test policies."
 ---
 
 `RetryPolicy` is a frozen dataclass that controls every aspect of what the client does when a request fails. Its defaults are production-sensible: four total attempts (first try plus three retries), exponential backoff from 0.5 s up to 8 s with a small random jitter, and a `max_retry_after` of 60 s that acts as a stop signal rather than a wait when the endpoint asks for longer. You only need to construct one directly when the defaults don't fit — either to be more aggressive about retrying, or to fail fast.

@@ -1,7 +1,7 @@
 ---
-title: "Verification, Diff, and Dead-Row Helpers"
+title: "Verify Parameters, Diff Drives, and Sweep Dead Rows"
 sidebarTitle: "Verify & Diff"
-description: "Use verify(), diff(), and dead_rows() to detect silent parameter drops, compare drive content, and sweep for dead links before the 72-hour purge window closes."
+description: "Use verify(), diff(), and dead_rows() to detect silent parameter drops, compare drive content, and sweep for dead links before the 72-hour purge closes."
 ---
 
 The endpoint answers 200 to everything, so a parameter that the index stopped honouring produces no error, no warning, and no change in the response shape — just a different (usually larger) result set. These three helpers make the silent failures visible.
@@ -43,21 +43,21 @@ print(report.explain())
   <Tab title="honoured">
     The parameter appeared in the echo with a value equal to what was sent. The set changed (or stayed the same for a parameter that legitimately changes nothing at the current default).
 
-    ```
+    ```text
     min_mirrors=2: honoured, the echo reports '2'; total 8,412 -> 1,039
     ```
   </Tab>
   <Tab title="rewritten">
     The parameter appeared in the echo but with a different value. The endpoint understood the name but normalised or clamped the value.
 
-    ```
+    ```text
     sort=Size: rewritten, the echo reports 'relevance' instead; total 8,412 -> 8,412
     ```
   </Tab>
   <Tab title="ignored">
     The parameter was absent from the echo entirely. This is the handbook's definition of "did nothing" — the name moved, was never supported, or is equal to the endpoint's own default.
 
-    ```
+    ```text
     min_mirrors=2: ignored, absent from the echo, so it changed nothing (total stayed 8,412).
     A value equal to the documented default may be omitted legitimately;
     anything else means the name moved.
@@ -215,8 +215,7 @@ python3 -m meawfy diff "trading post" --json
 ### Full example from `diff_drives.py`
 
 ```python
-from meawfy import PROVIDERS, MeawfyClient
-from meawfy.render import table
+from meawfy import PROVIDERS, MeawfyClient, table
 
 client = MeawfyClient()
 
@@ -258,12 +257,12 @@ raise SystemExit(0 if report.overlap else 1)
 
 ## `client.dead_rows()` — sweep for recently dead links
 
-`dead_rows()` is recipe R11 as a helper. It queries for rows with `alive=False` and `checked_after` set to the start of the purge window, then sorts oldest-check-first so you can process the most at-risk rows before they disappear.
+`dead_rows()` is recipe R11 as a helper. It sends **one request** — unlike `verify()` and `diff()`, it does not pair calls. It queries for rows with `alive=False` and `checked_after` set to the start of the purge window, then sorts oldest-check-first so you can process the most at-risk rows before they disappear.
 
 ```python
 def dead_rows(
     *,
-    within_hours: int = 72,  # default is the full grace window
+    within_hours: int = CAPS["dead_row_grace_hours"],  # defaults to 72
     **params,
 ) -> Envelope: ...
 ```

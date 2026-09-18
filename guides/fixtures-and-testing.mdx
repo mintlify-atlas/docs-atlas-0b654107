@@ -51,8 +51,7 @@ The file is valid JSON, indented, UTF-8. Parent directories are created automati
 `replay_transport(source)` returns a transport callable that answers **every** request with the same frozen envelope. It accepts a file path, a path string, or an already-loaded dict.
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.client import replay_transport
+from meawfy import MeawfyClient, replay_transport
 
 client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
 
@@ -65,14 +64,27 @@ print(envelope.total)   # the value from the file
 A replayed transport sets `X-RateLimit-Remaining: 120` on every response so the rate limiter does not block tests. No real network calls are made.
 </Note>
 
+### Passing a `Path` object
+
+`replay_transport` accepts a `pathlib.Path` directly — useful when paths are assembled programmatically:
+
+```python
+from pathlib import Path
+from meawfy import MeawfyClient, replay_transport
+
+fixture_path = Path("fixtures") / "periodic-table.json"
+client = MeawfyClient(transport=replay_transport(fixture_path))
+envelope = client.search("periodic table")
+print(envelope.total)   # the value from the file
+```
+
 ### Passing a pre-loaded dict
 
 When you already have the body in memory — from a test fixture or a parametrised test — pass a dict directly:
 
 ```python
 import json
-from meawfy import MeawfyClient
-from meawfy.client import replay_transport
+from meawfy import MeawfyClient, replay_transport
 
 with open("fixtures/periodic-table.json") as f:
     payload = json.load(f)
@@ -108,6 +120,10 @@ envelope = client.search("periodic table")
 ```
 
 The variable is read by `MeawfyClient.__init__` when no `transport` argument is given. Passing an explicit `transport` always takes precedence.
+
+<Note>
+Two other environment variables that affect the client: `MEAWFY_BASE_URL` overrides the default endpoint (`https://meawfy.com/internal/api/results.json`), and `MEAWFY_TIMEOUT` sets the per-request timeout in seconds (default 15). Both are read at `MeawfyClient.__init__` time and are overridden by their corresponding constructor arguments.
+</Note>
 
 ## `--fixture FILE` — CLI flag
 
@@ -150,8 +166,7 @@ python3 -m meawfy record fixtures/r7.json "course pack" \
 A fixture freezes the `query` object as it was at recording time. When you call `envelope.echo_report(sent_query)`, the comparison is against that frozen echo — not against what the endpoint would say today.
 
 ```python
-from meawfy import MeawfyClient, Query
-from meawfy.client import replay_transport
+from meawfy import MeawfyClient, Query, replay_transport
 
 client = MeawfyClient(transport=replay_transport("fixtures/periodic-table.json"))
 
@@ -211,8 +226,7 @@ The workflow the handbook recommends is:
 Offline test using a recorded fixture.
 """
 
-from meawfy import MeawfyClient, Query
-from meawfy.client import replay_transport
+from meawfy import MeawfyClient, Query, replay_transport
 
 FIXTURE = "fixtures/periodic-table.json"
 

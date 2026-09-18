@@ -20,15 +20,26 @@ The Meawfy results endpoint (`GET https://meawfy.com/internal/api/results.json`)
 
 ## Constants
 
-The following constants are importable from `meawfy.params`:
+All constants are importable directly from `meawfy`:
 
 ```python
-from meawfy.params import (
-    LOAD_BEARING,
+from meawfy import (
+    ALIASES,
+    BASE_ROW_FIELDS,
     CAPS,
-    PROVIDERS,
     EXPERIMENTAL_PROVIDERS,
+    FACET_SETS,
+    KINDS,
     KNOWN_PROVIDERS,
+    LOAD_BEARING,
+    PARAMS,
+    PREVIEW_SIZES,
+    PROVIDERS,
+    RESOLUTIONS,
+    ROW_FIELDS,
+    SIZE_BUCKETS,
+    SORT_KEYS,
+    WEIGHT_PRESETS,
 )
 
 LOAD_BEARING         # frozenset: {'search_query', 'providers', 'sort', 'order',
@@ -51,6 +62,41 @@ CAPS                 # {
                      #   'requests_per_minute': 120,
                      #   'dead_row_grace_hours': 72,
                      # }
+
+SORT_KEYS            # ('relevance', 'size', 'files', 'name', 'indexed',
+                     #  'checked', 'mirrors', 'has_preview')
+                     # The alias '_score' normalises to 'relevance' but is not in SORT_KEYS.
+
+WEIGHT_PRESETS       # ('exact', 'broad', 'folder', 'fresh')
+
+PREVIEW_SIZES        # ('tiny', 'small', 'medium', 'large')
+                     # Pixel widths: tiny=64, small=128, medium=256, large=512
+
+RESOLUTIONS          # ('480p', '720p', '1080p', '4k')
+
+SIZE_BUCKETS         # ('small', 'medium', 'large', 'huge')
+                     # small <100 MB · medium <1 GB · large <10 GB · huge ≥10 GB
+
+KINDS                # ('file', 'folder', 'any')
+
+FACET_SETS           # ('providers', 'ext', 'size', 'kind')
+                     # The string 'all' is also accepted by the facets parameter
+                     # as a shorthand for all four; it is not a member of this tuple.
+
+BASE_ROW_FIELDS      # ('id', 'name', 'provider', 'kind', 'ext', 'size_bytes',
+                     #  'size', 'files', 'path', 'url', 'hash', 'mirrors',
+                     #  'score', 'indexed_at', 'checked_at', 'alive')  — 16 fields
+
+ROW_FIELDS           # BASE_ROW_FIELDS + ('preview',)  — 17 fields total
+
+ALIASES              # {'query': 'search_query'}
+                     # Client-side only: the constructor's first positional argument
+                     # is named 'query'; on the wire it is always 'search_query'.
+                     # 'q' and 'provider' are their own separate parameters in PARAMS,
+                     # not entries in ALIASES.
+
+PARAMS               # Mapping[str, Param] — all 50 parameters in registry order.
+                     # Each Param has: name, group, category, status, default, summary.
 ```
 
 ## Caps
@@ -76,7 +122,7 @@ These parameters describe what you are looking for and which files qualify.
 <ParamField query="search_query" type="string" required>
   **`*` load-bearing · `contract`**
 
-  Free text matched against the file name and folder path. The site's own tokenizer applies: a space between terms means AND, a leading `-` negates a term, and `OR` (uppercase) is a disjunction. Capped at 200 characters; the client raises `InvalidParameter` if exceeded. The wire alias `q` is interchangeable on the client side; `search_query` wins when both are sent.
+  Free text matched against the file name and folder path. The site's own tokenizer applies: a space between terms means AND, a leading `-` negates a term, and `OR` (uppercase) is a disjunction. Capped at 200 characters; the client raises `InvalidParameter` if exceeded. The separate parameter `q` is interchangeable on the wire; `search_query` wins when both are present. Note: the `Query` constructor's first positional argument is named `query` (a client-side alias mapped by `ALIASES`), but the wire name is always `search_query`.
 
   ```python
   Query("climate report OR global warming", providers="mega")
@@ -87,7 +133,7 @@ These parameters describe what you are looking for and which files qualify.
 <ParamField query="q" type="string">
   **`contract`**
 
-  Alias for `search_query`, kept for bookmarklets and old links. When both `q` and `search_query` are present in the same request, `search_query` wins. Identical 200-character cap and normalisation rules apply.
+  Endpoint-level equivalent of `search_query`, kept for bookmarklets and old links. Both are separate documented parameters; the endpoint treats them as the same thing and `search_query` wins when both are present. Identical 200-character cap and normalisation rules apply. This is distinct from the `ALIASES` dict, which maps the Python `Query` constructor keyword `query` to `search_query`.
 </ParamField>
 
 <ParamField query="providers" type="string" default="all three">
@@ -463,7 +509,7 @@ These parameters decide sort order and the structure of the response.
 <ParamField query="facets" type="string" default="none">
   **`planned`**
 
-  Requests facet counts from the endpoint. Facets are computed over the entire restricted set before the page window, so `per_page=1` still returns counts for all matching rows. Accepted values: `providers`, `ext`, `size`, `kind`, or `all`.
+  Requests facet counts from the endpoint. Facets are computed over the entire restricted set before the page window, so `per_page=1` still returns counts for all matching rows. Accepted values: `providers`, `ext`, `size`, `kind`, or `all`. Note: `FACET_SETS` contains only the four named sets; `all` is a shorthand accepted by the validator but not stored in that tuple.
 
   ```python
   Query("climate report", facets="providers,ext")
@@ -503,7 +549,7 @@ These parameters decide sort order and the structure of the response.
 Eight additional hosts answer through the same `providers` parameter without being documented in the handbook. The client accepts them and emits an advisory note when any are used.
 
 ```python
-from meawfy.params import EXPERIMENTAL_PROVIDERS
+from meawfy import EXPERIMENTAL_PROVIDERS
 
 print(EXPERIMENTAL_PROVIDERS)
 # ('rapidshare', 'pixeldrain', 'filebin', 'gofile',
@@ -536,7 +582,7 @@ print(q.advice[0])
 
 The endpoint processes parameters in five stages. Filters decide what is in the result set; `sort` and `order` decide what you see first; shape parameters decide the structure of the response.
 
-```
+```text
 1 tokenise   search_query → terms, phrases, negations
 2 restrict   providers · ext · kind · size · files · dates · liveness · dedupe
              preview · media · metadata · identity · folder

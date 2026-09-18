@@ -1,7 +1,7 @@
 ---
-title: "Rate Limiting: 120 Requests per Minute"
+title: "Rate Limiting, Sliding Windows, and the 429 Handler"
 sidebarTitle: "Rate Limiting"
-description: "Understand the 120-request sliding window, how RateLimiter paces requests locally, how RetryPolicy handles 429 responses, and how to monitor remaining capacity."
+description: "Understand the 120-request sliding window, how RateLimiter paces locally, how RetryPolicy handles 429 responses, and how to monitor remaining capacity."
 ---
 
 The endpoint allows 120 requests per minute, shared with the site's own front end. The budget is small, and `collect()` over a wide query can spend dozens of requests before the first page of results is even processed. The client paces locally so the wall is rarely reached, but knowing how the system works lets you stay well clear of it.
@@ -44,7 +44,7 @@ When the window is exhausted, the endpoint responds with HTTP 429. The `Retry-Af
 
 `Retry-After` arrives in one of two formats:
 
-```
+```text
 Retry-After: 42
 Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
 ```
@@ -161,8 +161,7 @@ When a `429` is received, the `_retry_wait()` method on the client decides wheth
 3. Otherwise wait for `Retry-After` seconds (clamped to `max_retry_after`), then try again.
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.client import RetryPolicy
+from meawfy import MeawfyClient, RetryPolicy
 
 # Custom policy: give up faster, accept longer waits
 policy = RetryPolicy(
@@ -212,6 +211,26 @@ print(client.limiter.limit)   # 30
 
 The variable is read at `MeawfyClient.__init__` time. An explicit `requests_per_minute` argument always takes precedence.
 
+## `MEAWFY_TIMEOUT` environment variable
+
+Set `MEAWFY_TIMEOUT` to a float (seconds) to override the default per-request timeout of 15 seconds. This is separate from the rate limiter — it controls how long a single HTTP request is allowed to take before a `TransportError` is raised.
+
+```bash
+# Allow 30 seconds per request
+MEAWFY_TIMEOUT=30 python3 my_script.py
+```
+
+```python
+import os
+from meawfy import MeawfyClient
+
+os.environ["MEAWFY_TIMEOUT"] = "30"
+client = MeawfyClient()    # picks up the variable; equivalent to MeawfyClient(timeout=30)
+print(client.timeout)      # 30.0
+```
+
+An explicit `timeout` constructor argument always takes precedence over the environment variable.
+
 ## Best practices
 
 <CardGroup cols={2}>
@@ -230,8 +249,7 @@ The variable is read at `MeawfyClient.__init__` time. An explicit `requests_per_
 </CardGroup>
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.errors import RateLimited
+from meawfy import MeawfyClient, RateLimited
 
 client = MeawfyClient(requests_per_minute=60)  # conservative ceiling
 

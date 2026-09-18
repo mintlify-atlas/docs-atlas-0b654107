@@ -8,17 +8,31 @@ The meawfy endpoint answers `200` to almost everything, so most failures are inv
 
 ## Hierarchy at a glance
 
-```
-MeawfyError
-├── InvalidParameter
-│   ├── UnknownParameter
-│   └── DeepPagingError
-├── ResponseError
-└── TransportError
-    └── RateLimited
+```text
+MeawfyError(Exception)
+├── InvalidParameter(MeawfyError)
+│   ├── UnknownParameter(InvalidParameter)
+│   └── DeepPagingError(InvalidParameter)
+├── ResponseError(MeawfyError)
+└── TransportError(MeawfyError)
+    └── RateLimited(TransportError)
 ```
 
 Catching `MeawfyError` covers everything in the package. Catching `InvalidParameter` covers both `UnknownParameter` and `DeepPagingError`. Catching `TransportError` covers `RateLimited`.
+
+All seven classes are exported from the top-level package and can be imported directly:
+
+```python
+from meawfy import (
+    MeawfyError,
+    InvalidParameter,
+    UnknownParameter,
+    DeepPagingError,
+    ResponseError,
+    TransportError,
+    RateLimited,
+)
+```
 
 ## Exit codes (CLI)
 
@@ -41,8 +55,7 @@ The command-line interface maps these classes to specific exit codes:
 `MeawfyError` is a direct subclass of the built-in `Exception` and is the base class for every error this package raises. Catching it gives you a single handler for the whole package without catching anything from the standard library or third-party code.
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.errors import MeawfyError
+from meawfy import MeawfyClient, MeawfyError
 
 client = MeawfyClient()
 
@@ -94,8 +107,7 @@ The message format is `{name}={value!r} rejected: {reason}`.
 - A `min_size` or `max_size` that cannot be parsed as bytes or a recognised suffix
 
 ```python
-from meawfy import Query
-from meawfy.errors import InvalidParameter
+from meawfy import Query, InvalidParameter
 
 try:
     query = Query("climate report", sort="Size")   # capital S — silently ignored by the endpoint
@@ -133,7 +145,7 @@ class InvalidParameter(MeawfyError):
 </ResponseField>
 
 <ResponseField name="name" type="str" required>
-  The first unknown name, inherited from `InvalidParameter`.
+  The first unknown name (`self.names[0]`), inherited from `InvalidParameter`.
 </ResponseField>
 
 <ResponseField name="value" type="None" required>
@@ -142,15 +154,14 @@ class InvalidParameter(MeawfyError):
 
 **The closest-name hint** is computed by a prefix-similarity score and appended to the error message automatically:
 
-```
+```text
 unknown parameter(s): searh_query (closest: search_query)
 ```
 
 This makes typos easy to diagnose at the console or in a log.
 
 ```python
-from meawfy import Query
-from meawfy.errors import InvalidParameter, UnknownParameter
+from meawfy import Query, InvalidParameter, UnknownParameter
 
 try:
     query = Query("atlas", searh_query="atlas")   # typo
@@ -192,9 +203,10 @@ The endpoint does not refuse deep pages — it keeps answering with the cap appl
 
 **Why a subclass of `InvalidParameter`:** the `page` and `per_page` combination is itself an invalid parameter set, and catching `InvalidParameter` covers it alongside every other pre-flight validation failure.
 
+`DeepPagingError` has no additional `__init__` beyond `InvalidParameter`; it inherits `name`, `value`, and `reason` directly.
+
 ```python
-from meawfy import MeawfyClient, Query
-from meawfy.errors import DeepPagingError, InvalidParameter
+from meawfy import MeawfyClient, Query, DeepPagingError, InvalidParameter
 
 client = MeawfyClient()
 
@@ -212,8 +224,7 @@ except DeepPagingError as exc:
 When you hit the cap, the correct response is to narrow the filters rather than paginate deeper. Add `ext`, `min_size`/`max_size`, or `providers` constraints to reduce the result set to below 10,000 rows.
 
 ```python
-from meawfy import MeawfyClient, Query
-from meawfy.errors import DeepPagingError
+from meawfy import MeawfyClient, Query, DeepPagingError
 
 client = MeawfyClient()
 
@@ -266,8 +277,7 @@ class DeepPagingError(InvalidParameter):
 The message format is `{code}: {message}`.
 
 ```python
-from meawfy import MeawfyClient, Query
-from meawfy.errors import ResponseError
+from meawfy import MeawfyClient, Query, ResponseError
 
 client = MeawfyClient()
 
@@ -332,8 +342,7 @@ class ResponseError(MeawfyError):
 </ResponseField>
 
 ```python
-from meawfy import MeawfyClient, Query
-from meawfy.errors import TransportError
+from meawfy import MeawfyClient, Query, TransportError
 
 client = MeawfyClient()
 
@@ -375,7 +384,7 @@ class TransportError(MeawfyError):
 
 <Accordion title="RateLimited — the 429 wall">
 
-`RateLimited` is a subclass of `TransportError` raised on a `429 Too Many Requests` response. It is the only place in the endpoint's protocol where the HTTP status code is the signal — everything else, including application-level errors, arrives under a `200`.
+`RateLimited` is a subclass of `TransportError` raised on a `429 Too Many Requests` response. It is the only place in the endpoint's protocol where the HTTP status code is the signal — everything else, including application-level errors, arrives under a `200`. This corresponds to Handbook trap 6.
 
 The endpoint allows 120 requests per minute. Each response carries an `X-RateLimit-Remaining` header counting down. When that counter reaches zero, the endpoint returns `429` with a `Retry-After` header in seconds.
 
@@ -395,8 +404,7 @@ The endpoint allows 120 requests per minute. Each response carries an `X-RateLim
 
 ```python
 import time
-from meawfy import MeawfyClient, Query
-from meawfy.errors import RateLimited, TransportError
+from meawfy import MeawfyClient, Query, RateLimited, TransportError
 
 client = MeawfyClient()
 
@@ -462,8 +470,8 @@ The patterns below cover the most common cases. Each targets the narrowest excep
     Use `MeawfyError` as the single catch-all for any script or CLI tool that wants one handler for all package failures:
 
     ```python
-    from meawfy import MeawfyClient, Query
-    from meawfy.errors import MeawfyError
+    import sys
+    from meawfy import MeawfyClient, Query, MeawfyError
 
     client = MeawfyClient()
 
@@ -480,8 +488,7 @@ The patterns below cover the most common cases. Each targets the narrowest excep
     Catching `InvalidParameter` covers `UnknownParameter` and `DeepPagingError` too, because both are subclasses. This is the right handler for input validation pipelines that want to surface parameter mistakes before retrying with corrected values:
 
     ```python
-    from meawfy import Query
-    from meawfy.errors import InvalidParameter, UnknownParameter
+    from meawfy import Query, InvalidParameter, UnknownParameter
 
     def build_query(user_params: dict) -> Query:
         try:
@@ -499,8 +506,7 @@ The patterns below cover the most common cases. Each targets the narrowest excep
 
     ```python
     import time
-    from meawfy import MeawfyClient, Query
-    from meawfy.errors import RateLimited
+    from meawfy import MeawfyClient, Query, RateLimited
 
     client = MeawfyClient(max_retries=0)   # disable automatic retries for this example
 
@@ -520,8 +526,7 @@ The patterns below cover the most common cases. Each targets the narrowest excep
     Two styles for handling body-level errors. Use `ResponseError` in call-site code that wants exceptions to propagate; use `Envelope.ok` in pipeline code that treats errors as data:
 
     ```python
-    from meawfy import MeawfyClient, Query
-    from meawfy.errors import ResponseError
+    from meawfy import MeawfyClient, Query, ResponseError
 
     client = MeawfyClient()
 
@@ -545,8 +550,7 @@ The patterns below cover the most common cases. Each targets the narrowest excep
     When `page × per_page > 10,000`, narrow the query rather than reducing the page number. The correct fix is a smaller result set, not a shallower page:
 
     ```python
-    from meawfy import MeawfyClient, Query
-    from meawfy.errors import DeepPagingError
+    from meawfy import MeawfyClient, Query, DeepPagingError
 
     client = MeawfyClient()
 
@@ -580,7 +584,8 @@ Each exception class corresponds to a named failure mode from *The Query Handboo
 |-----------|--------------|-----------------|
 | `UnknownParameter` | Trap 1 — "An unknown parameter is ignored" | Before the request, on an unrecognised parameter name |
 | `ResponseError` | Trap 2 — "A 200 is not a success" | After the request, when the body contains an `error` object |
-| `InvalidParameter` | Trap 4/5 — silent enum fall-through, value caps | Before the request, on any out-of-vocabulary or out-of-range value |
-| `RateLimited` | Trap 7 — "120 requests per minute — then a wall" | On a `429` response, after retries are exhausted |
+| `InvalidParameter` | Trap 5 — silent enum fall-through, value caps | Before the request, on any out-of-vocabulary or out-of-range value |
+| `RateLimited` | Trap 6 — "120 requests per minute — then a wall" | On a `429` response, after retries are exhausted |
+| *(no exception)* | Trap 7 — "Dead rows vanish" | Not an exception; dead rows are retrieved via `client.dead_rows()` before the 72-hour purge window closes |
 | `DeepPagingError` | Trap 8 — "Paging stops at ten thousand rows" | Before the request, when `page × per_page > 10,000` |
 | `TransportError` | (below HTTP) | On DNS failure, TLS error, timeout, or non-JSON response |

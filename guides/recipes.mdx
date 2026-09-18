@@ -1,7 +1,7 @@
 ---
-title: "Query Handbook Recipes R7–R14 Explained"
+title: "Sheet 18 Recipes R7–R14: Ready-Made Search Parameter Sets"
 sidebarTitle: "Recipes"
-description: "Run the eight ready-made parameter sets from sheet 18 of The Query Handbook, override placeholder dates, and customise any recipe with params_for() or --set."
+description: "Run the eight ready-made parameter sets from sheet 18, override placeholder dates, and customise any recipe with params_for() or the --set CLI flag."
 ---
 
 The recipes on sheet 18 of *The Query Handbook* are eight complete, runnable requests — each one designed around a specific retrieval task. Rather than assembling parameters from scratch, you paste the recipe, swap the search term, and go. The client ships all eight as first-class objects under the codes R7 through R14.
@@ -11,7 +11,7 @@ The recipes on sheet 18 of *The Query Handbook* are eight complete, runnable req
 A `Recipe` is a frozen dataclass holding a code, a title, a parameter dict, and a note from the handbook. Placeholder strings like `{today-3d}` appear in any recipe that depends on a relative date — they are resolved to real ISO dates at the moment you call `params_for()` or `run_recipe()`, so the recipes continue to return rows long after their Edition 1 print dates have passed.
 
 ```python
-from meawfy.recipes import Recipe
+from meawfy import Recipe
 # Recipe(code, title, params, note)
 # params_for() resolves {today-Nd} placeholders and applies your overrides
 ```

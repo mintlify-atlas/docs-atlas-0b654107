@@ -1,7 +1,7 @@
 ---
-title: "Envelope — Parsing and Reading the Response Object"
+title: "Envelope — Parsing the API Response Object"
 sidebarTitle: "Envelope"
-description: "The Envelope wraps every field the endpoint returns: the echo, warnings, pagination counts, facets, rate-limit header, and the result rows."
+description: "Envelope wraps every field the endpoint returns: the echo, warnings, pagination counts, facets, rate-limit header, and the result rows."
 ---
 
 Every call to `GET https://meawfy.com/internal/api/results.json` returns a single JSON object. The `Envelope` class wraps that object and gives you typed access to each part of it — counts, facets, rate-limit metadata, and the rows themselves. Because the endpoint answers `200` to everything, including malformed requests, the envelope's echo is the primary debugging surface: it tells you what the endpoint actually understood, not what you sent.
@@ -9,10 +9,10 @@ Every call to `GET https://meawfy.com/internal/api/results.json` returns a singl
 ## Constructor
 
 ```python
-Envelope(payload, headers, url)
+Envelope(payload, headers=None, url=None)
 ```
 
-You will almost never construct an `Envelope` yourself — `MeawfyClient.search()` returns one. The constructor takes the raw decoded JSON dict as `payload`, an optional headers mapping (used to read `X-RateLimit-Remaining`), and the request URL.
+You will almost never construct an `Envelope` yourself — `MeawfyClient.search()` returns one. The constructor takes the raw decoded JSON dict as `payload`, an optional headers mapping (used to read the `x-ratelimit-remaining` header), and the request URL. Both `headers` and `url` are optional and default to `None`. Header keys are lowercased on ingestion.
 
 ```python
 from meawfy import MeawfyClient
@@ -95,10 +95,10 @@ The raw JSON body returned by the endpoint has this structure:
 
 ```python
 envelope.query  # dict[str, Any]
-envelope.echo   # same object — an alias
+envelope.echo   # same object — a class-level alias for the query property
 ```
 
-The `query` object echoes what the endpoint *understood*, never what you sent. A parameter missing from this dict did nothing. On an endpoint that answers `200` to everything, this is the whole debugging story.
+The `query` object echoes what the endpoint *understood*, never what you sent. A parameter missing from this dict did nothing. On an endpoint that answers `200` to everything, this is the whole debugging story. `echo` is assigned as a class-level alias (`echo = query`), so `envelope.echo` and `envelope.query` return the identical dict.
 
 ```python
 # Check which parameters the endpoint honoured
@@ -129,7 +129,7 @@ Present when the body contains an `error` object. The endpoint returns this unde
 envelope.ok  # bool
 ```
 
-`False` when the body carried an `error` object. Check this before accessing `results` when you are not using `MeawfyClient.search()`.
+`False` when `self.error is not None` — i.e. when the body carried an `error` object. The endpoint returns `200` even for error responses, so the HTTP status code alone is not a reliable success signal. Check this before accessing `results` when you are not using `MeawfyClient.search()`.
 
 ### `explain`
 
@@ -193,7 +193,7 @@ How long the endpoint spent on this request, in milliseconds. Observed range is 
 envelope.rate_limit_remaining  # int | None
 ```
 
-Read from the `X-RateLimit-Remaining` response header. `None` before the first call, or when the transport did not forward headers. The budget is 120 requests per minute; the sliding-window `RateLimiter` inside `MeawfyClient` paces locally so the wall is rarely reached.
+Read from the `x-ratelimit-remaining` response header (header keys are lowercased on ingestion). `None` when the header was not present or could not be parsed as an integer. The budget is 120 requests per minute; the sliding-window `RateLimiter` inside `MeawfyClient` paces locally so the wall is rarely reached.
 
 ### `has_rows`
 
@@ -219,10 +219,10 @@ An immutable tuple of `Result` objects. Empty on an error response or a query th
 
 ```python
 envelope.payload  # dict[str, Any]
-envelope.raw      # same object — an alias
+envelope.raw      # property alias — returns self.payload
 ```
 
-The raw decoded JSON dict, exactly as returned by the transport. Useful for serialising back to JSON, diffing against a fixture, or accessing any field the typed properties do not cover.
+The raw decoded JSON dict, exactly as returned by the transport. `raw` is a property that returns `self.payload` directly; the two names refer to the same object. Useful for serialising back to JSON, diffing against a fixture, or accessing any field the typed properties do not cover.
 
 ### `facets`
 
@@ -230,7 +230,7 @@ The raw decoded JSON dict, exactly as returned by the transport. Useful for seri
 envelope.facets  # dict[str, Any]
 ```
 
-The raw facets dict from the response. Facets are computed *after* the filters and *before* the page window, so they describe the whole restricted set — not just the current page. A `facets=providers` request with `per_page=1` still gives you provider counts for all matching rows.
+The raw facets dict from the response. Returns an empty dict (never `None`) when the response contained no facets data or when `facets=` was not requested. Facets are computed *after* the filters and *before* the page window, so they describe the whole restricted set — not just the current page. A `facets=providers` request with `per_page=1` still gives you provider counts for all matching rows.
 
   </Accordion>
 </AccordionGroup>
@@ -265,7 +265,7 @@ counts = envelope.provider_counts()
 
 ### `echo_report(sent) → EchoReport`
 
-Compares the envelope's echo against a `Query` object or a plain dict of parameter names to sent values. Returns an `EchoReport` describing which parameters were honoured, which were rewritten, and which are absent from the echo entirely.
+Compares the envelope's echo against a `Query` object or any dict-like mapping of parameter names to sent values. When `sent` has a `.pairs()` method (as `Query` does), it is called to obtain the wire-form pairs; otherwise `dict(sent).items()` is used. Returns an `EchoReport` describing which parameters were honoured, which were rewritten, and which are absent from the echo entirely.
 
 ```python
 from meawfy import Query
@@ -284,7 +284,7 @@ print(report.summary())
 
 ## Iteration and Length
 
-`Envelope` supports direct iteration over its results and `len()`:
+`Envelope` implements `__iter__` and `__len__` over `self.results`. Iterating `for row in envelope` is exactly equivalent to iterating `for row in envelope.results`:
 
 ```python
 # Iterate rows directly

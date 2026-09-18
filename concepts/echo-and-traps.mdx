@@ -1,5 +1,5 @@
 ---
-title: "The Echo Mechanism and the Eight Endpoint Traps"
+title: "Echo Reports and the Eight Silent Endpoint Failure Modes"
 sidebarTitle: "Echo & Traps"
 description: "How to read the EchoReport to confirm what the endpoint understood, and a complete guide to the eight silent failure modes with client-side remedies."
 ---
@@ -32,11 +32,13 @@ print(envelope.query)
 
 ## Reading an EchoReport
 
-`Envelope.echo_report(query)` compares the envelope's echo against the `Query` you sent and returns an `EchoReport` with three buckets:
+`Envelope.echo_report(query)` compares the envelope's echo against the `Query` you sent (or a plain `dict` of wire-form pairs) and returns an `EchoReport` with three buckets:
 
-- **`honoured`** — the parameter was echoed, and the echo matches what you sent
-- **`changed`** — the parameter was echoed, but the endpoint understood something different
-- **`absent`** — the parameter is not in the echo at all, which means it did nothing
+| Field | Type | Meaning |
+|---|---|---|
+| `honoured` | `Mapping[str, str]` | Echoed back, and the value matches what you sent |
+| `changed` | `Mapping[str, tuple[str, str]]` | Echoed, but the endpoint understood something different — each entry is `(sent, echoed)` |
+| `absent` | `tuple[str, ...]` | Not in the echo at all; the parameter did nothing |
 
 ```python
 report = envelope.echo_report(query)

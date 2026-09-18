@@ -1,10 +1,10 @@
 ---
-title: "Result and Preview — Row and Thumbnail Objects"
+title: "Result and Preview — Row Fields and Thumbnails"
 sidebarTitle: "Result"
 description: "Result wraps one index row. All 17 fields are accessible by attribute or key, with computed properties for human size, dates, dedupe key, and Preview."
 ---
 
-Each item inside `envelope.results` is a `Result` object. It wraps a single row from the endpoint's JSON array and gives you typed access to all 17 fields — either by attribute (`row.name`) or by key (`row["name"]`). A `Preview` dataclass is nested inside any row where the endpoint returned thumbnail metadata.
+Each item inside `envelope.results` is a `Result` object. It wraps a single row from the endpoint's JSON array and gives you typed access to all 17 fields — either by attribute (`row.name`) or by key (`row["name"]`). `Result` uses `__slots__ = ('_data',)` and stores all field data in a single `_data` dict; it is not a dataclass. A `Preview` frozen dataclass is nested inside any row where the endpoint returned thumbnail metadata.
 
 ## The 17 Fields
 
@@ -12,7 +12,7 @@ The endpoint returns up to 17 fields per row: 16 base fields that are always pre
 
 When you send a `fields=` projection, fields not listed are simply absent from the row. Accessing an absent field raises `AttributeError` with a message that names the field:
 
-```
+```text
 AttributeError: row has no field 'hash' (projected out, or never returned)
 ```
 
@@ -38,7 +38,7 @@ Use `row.get("hash")` or `"hash" in row` to access fields safely when the projec
 | `indexed_at` | `str \| None` | ISO date of first indexing, e.g. `"2024-03-15"` | The day the indexer saw it, not the day the file was created |
 | `checked_at` | `str \| None` | ISO date of last liveness check | Freshness of the check, not of the file content |
 | `alive` | `bool \| None` | `False` once a dead link is detected | Default filter is `alive=true`; dead rows are purged after 72 hours |
-| `preview` | `dict \| None` | Raw preview object from the endpoint | Use the `.preview` property to get a typed `Preview` instance |
+| `preview` | `dict \| None` | Raw preview mapping from the endpoint | Use the `.preview` computed property to get a typed `Preview` instance; `None` unless `preview=1` was sent |
 
 ## Accessing Fields
 
@@ -102,7 +102,7 @@ Returns `size_bytes` as an integer, or `None` if the field is absent, `null`, or
 row.dedupe_key  # str
 ```
 
-The key the `dedupe` parameter collapses on, and the key to use when comparing rows across drives with `diff()`. Prefers `hash`; falls back to `id` when `hash` is absent; returns an empty string when both are absent.
+The key the `dedupe` parameter collapses on, and the key to use when comparing rows across drives with `diff()`. Computed as `str(self._data.get('hash') or self._data.get('id') or '')`: prefers `hash`; falls back to `id` when `hash` is absent or falsy; returns an empty string when both are absent.
 
 ```python
 # Group rows by deduplicated content
@@ -204,8 +204,12 @@ print(row.keys())
 `Preview` is a frozen dataclass holding thumbnail metadata. It is only populated when `preview=1` is sent and the endpoint found a renderable thumbnail for the row. Documents, most folders, and rows without an extractable frame return `null`.
 
 ```python
-from meawfy.models import Preview
+from meawfy import Preview
+```
 
+`Preview` is a frozen dataclass with the following fields:
+
+```python
 @dataclass(frozen=True)
 class Preview:
     url: str
@@ -237,6 +241,25 @@ preview.size  # str — e.g. "256x144" or "?"
 ```
 
 Returns `"{width}x{height}"` when both dimensions are present, or `"?"` otherwise.
+
+### `Preview.from_mapping(raw)` classmethod
+
+```python
+Preview.from_mapping(raw: Mapping[str, Any]) -> Preview | None
+```
+
+Constructs a `Preview` from a raw mapping (the JSON object in the `preview` field). Returns `None` when `raw` has no `url` key or when `url` is falsy. This is the method used internally by the `Result.preview` property.
+
+```python
+# Construct a Preview directly from a mapping
+raw = {"url": "https://cdn.meawfy.com/t/abc.jpg", "width": 256, "height": 144, "mime": "image/jpeg"}
+p = Preview.from_mapping(raw)
+print(p.size)  # "256x144"
+print(p.mime)  # "image/jpeg"
+
+# Returns None when url is absent
+Preview.from_mapping({"width": 256})  # None
+```
 
 ```python
 # Accessing preview data

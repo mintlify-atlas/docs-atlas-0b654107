@@ -11,7 +11,7 @@ The client returns four structured report objects from its multi-call helpers. T
 `EchoReport` answers the question: *did the endpoint act on what I sent?* Because the endpoint answers `200` to everything — ignoring unknown parameter names, silently falling through on bad enum values — the echo object inside every response is the only evidence that a parameter did anything. `EchoReport` compares what you sent against what the endpoint echoed back.
 
 ```python
-from meawfy.models import EchoReport
+from meawfy import EchoReport
 ```
 
 ### Fields
@@ -61,7 +61,7 @@ EchoReport.from_pairs(sent: Mapping[str, str], echo: Mapping[str, Any]) -> EchoR
 Constructs an `EchoReport` by diffing `sent` (a dict of wire-name → sent-value string pairs) against `echo` (the `query` object from an `Envelope`). This is the underlying method used by both `Envelope.echo_report()` and `MeawfyClient.verify()`.
 
 ```python
-from meawfy.models import EchoReport
+from meawfy import EchoReport
 
 sent = {"search_query": "atlas", "min_mirrors": "2", "sort": "indexed"}
 echo = {"search_query": "atlas", "sort": "relevance"}  # min_mirrors absent, sort changed
@@ -106,7 +106,7 @@ if not report.ok:
 `Collection` is returned by `MeawfyClient.collect()`, which walks multiple pages and accumulates all rows up to the reachable 10,000-row window. It is a frozen dataclass.
 
 ```python
-from meawfy.reports import Collection
+from meawfy import Collection
 
 collection = client.collect(
     "climate report",
@@ -179,7 +179,7 @@ There is no way to page past 10,000 rows. The endpoint enforces the cap silently
 `VerificationReport` is returned by `MeawfyClient.verify()`, which sends the request *twice* — once with a parameter and once without — and diffs the echo. This is the handbook's own test for a parameter whose name may have moved or whose implementation was dropped.
 
 ```python
-from meawfy.reports import VerificationReport
+from meawfy import VerificationReport
 
 report = client.verify("min_mirrors", 2, "worksheet")
 ```
@@ -286,7 +286,7 @@ if not report.honoured:
 `DiffReport` is returned by `MeawfyClient.diff()` (Recipe R12). It compares two drives on a content key — by default `hash` — and reports what is shared, what is unique to each side, and the names that appear on both sides while the content key differs.
 
 ```python
-from meawfy.reports import DiffReport
+from meawfy import DiffReport
 
 report = client.diff(
     "trading post",
@@ -348,7 +348,7 @@ report = client.diff(
 report.overlap  # int — len(shared_keys)
 ```
 
-The count of content keys shared between both drives. A diff script can use this as a truthy gate:
+The count of content keys present in both drives. Equivalent to `len(report.shared_keys)`. A diff script can use this as a truthy gate — zero means the two drives share no content keys on the page compared:
 
 ```python
 # From examples/diff_drives.py

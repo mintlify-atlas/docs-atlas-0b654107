@@ -1,5 +1,5 @@
 ---
-title: "MeawfyClient — Python Client for results.json"
+title: "MeawfyClient — Python SDK for the results.json API"
 sidebarTitle: "MeawfyClient"
 description: "Complete reference for MeawfyClient: constructor, every method, properties, stats dict, and working code examples for search, paging, and verification."
 ---
@@ -93,8 +93,7 @@ The last `X-RateLimit-Remaining` value seen on any response, or `None` before th
 ### `stats`
 
 ```python
-@property  # not decorated, but a plain dict attribute
-stats: dict[str, Any]
+stats: dict[str, Any]  # plain dict attribute, present from construction
 ```
 
 A running tally updated after every attempt. All keys are present from construction:

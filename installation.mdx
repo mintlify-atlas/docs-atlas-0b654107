@@ -74,21 +74,22 @@ Copying the directory works, but you lose the connection to the upstream reposit
 
 ## Verifying the installation
 
-Run two commands that make no network calls. The first checks that the CLI is importable and the `argparse` setup is intact. The second prints the seven load-bearing parameters and confirms the registry passes its internal assertions (the module asserts `len(PARAMS) == 50` on import):
+Run two commands that make no network calls. The first checks that the CLI is importable and the `argparse` setup is intact. The second prints only the seven load-bearing parameters and confirms the registry passes its internal assertions (the module asserts `len(PARAMS) == 50` on import):
 
 ```bash
 # Zero network requests, confirms the package is importable
+# Lists all 18 contract-status parameters: the names the endpoint honours today
 python3 -m meawfy params --status contract
 ```
 
-Expected output lists the seven `contract`-status parameters: `search_query`, `q`, `providers`, `provider`, `ext`, `license`, `min_size`, `max_size`, `min_files`, `after`, `before`, `alive`, `dedupe`, `sort`, `order`, `page`, `per_page`, and `fields`.
+Expected output includes all `contract`-status parameters: `search_query`, `q`, `providers`, `provider`, `ext`, `license`, `min_size`, `max_size`, `min_files`, `after`, `before`, `alive`, `dedupe`, `sort`, `order`, `page`, `per_page`, and `fields`.
 
 ```bash
-# Also zero network requests — lists only the load-bearing subset
+# Also zero network requests — lists only the seven load-bearing parameters
 python3 -m meawfy params --load-bearing
 ```
 
-Expected output lists exactly: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`.
+Expected output lists exactly the seven load-bearing names: `search_query`, `providers`, `sort`, `order`, `page`, `per_page`, `fields`.
 
 To confirm the transport layer works end-to-end, print a URL without sending it:
 

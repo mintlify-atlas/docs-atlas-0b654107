@@ -1,5 +1,5 @@
 ---
-title: "Paging and Collecting Multi-Page Results"
+title: "Paging, Collecting, and the 10,000-Row Window Explained"
 sidebarTitle: "Paging & Collecting"
 description: "Walk the 10,000-row window safely with iterate() and collect(). Understand the cap, the truncated flag, and when to narrow rather than go deeper."
 ---
@@ -15,8 +15,7 @@ A `page × per_page` value that exceeds 10,000 does **not** return an empty resp
 </Warning>
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.errors import DeepPagingError
+from meawfy import DeepPagingError, MeawfyClient
 
 client = MeawfyClient()
 
@@ -38,9 +37,9 @@ except DeepPagingError as exc:
 def iterate(
     query=None,
     *,
-    per_page: int = 100,          # rows per page; capped at 100
-    start_page: int = 1,          # first page to fetch (one-based)
-    max_rows: int | None = None,  # stop after this many rows
+    per_page: int = CAPS["per_page_max"],  # defaults to 100 (the per-page cap)
+    start_page: int = 1,                   # first page to fetch (one-based)
+    max_rows: int | None = None,           # stop after this many rows
     **params,
 ) -> Iterator[Result]: ...
 ```
@@ -101,7 +100,7 @@ def iterate(
 def collect(
     query=None,
     *,
-    per_page: int = 100,
+    per_page: int = CAPS["per_page_max"],  # defaults to 100 (the per-page cap)
     max_rows: int | None = None,
     start_page: int = 1,
     **params,
@@ -155,7 +154,7 @@ if result.advice:
 
 When `total` exceeds what fits inside the window, `collect()` sets `truncated = True` and populates `advice` with a message like:
 
-```
+```text
 12,400 rows exceed the 10,000-row window at per_page=100;
 a narrowed set is always the better answer than a deeper page
 ```
@@ -211,8 +210,7 @@ print(f"narrowed: {narrow.total} total, {len(narrow.rows)} collected, truncated=
 If you are constructing page numbers yourself rather than using `iterate()` or `collect()`, catch `DeepPagingError` to know when to stop:
 
 ```python
-from meawfy import MeawfyClient
-from meawfy.errors import DeepPagingError
+from meawfy import DeepPagingError, MeawfyClient
 
 client = MeawfyClient()
 page = 1
@@ -229,11 +227,11 @@ while True:
         break
 
     for row in envelope.results:
-        process(row)
+        print(row.name, row.human_size)  # replace with your processing logic
 
     page += 1
 ```
 
 <Tip>
-Use `iterate()` instead of a manual loop whenever possible. It handles `DeepPagingError` internally, stops correctly at the window boundary, and produces cleaner code.
+Use `iterate()` instead of a manual loop whenever possible. It stops naturally at the window boundary (the internal `_paginate()` loop condition prevents exceeding `page × per_page ≤ 10,000`) and produces cleaner code than manual page management.
 </Tip>

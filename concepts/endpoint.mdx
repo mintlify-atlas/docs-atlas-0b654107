@@ -1,5 +1,5 @@
 ---
-title: "The Meawfy Endpoint: URL, Providers, and Response"
+title: "The Meawfy Endpoint: URL, Providers, and Response Envelope"
 sidebarTitle: "The Endpoint"
 description: "Everything the Meawfy results endpoint accepts and returns — URL, auth, envelope structure, result fields, rate-limit headers, and the 50 parameters."
 ---
@@ -72,7 +72,7 @@ Two things differ from the documented drives:
 1. **Thinner rows.** A MEGA row is far more complete. What these carry of the 17 fields is less, and a filter or sort that reads a missing field has less to work with.
 2. **The `url` is already unlocked.** With MEGA, unlocking is a separate credited step on the site. For experimental providers, the `url` field holds the link itself — nothing here has to unlock it.
 
-`Result.from_experimental_provider` is `True` on any row from one of these hosts. The `Query` class will add an advisory note to `query.advice` when an experimental provider name is used:
+`row.from_experimental_provider` is `True` on any row whose `provider` field is one of these eight hosts. The `Query` class will add an advisory note to `query.advice` when an experimental provider name is used:
 
 ```python
 from meawfy import Query
